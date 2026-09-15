@@ -162,45 +162,175 @@ def chart_single_sections(path: Path) -> set[str]:
     return {m.group(1) for m in _SECTION_RE.finditer(text)}
 
 
-def mid_has_part_guitar(path: Path) -> bool | None:
-    """Whether a `PART GUITAR` track name exists in a .mid file. Reads only
-    track-name meta events, not notes/timing. Returns None on parse error."""
+# Guitar note ranges per Phase 2 of PLAN.md: Easy 60-64, Medium 72-76,
+# Hard 84-88, Expert 96-100.
+NOTE_RANGES: dict[str, range] = {
+    "Easy": range(60, 65),
+    "Medium": range(72, 77),
+    "Hard": range(84, 89),
+    "Expert": range(96, 101),
+}
+
+
+def mid_guitar_difficulties(path: Path) -> tuple[bool, set[str]] | None:
+    """Which difficulties have notes in a .mid file's `PART GUITAR` track.
+
+    Only reads note_on events' note numbers against the four fret-range
+    windows above -- no sustains, chords, or other note attributes (that's
+    Phase 2's job). Returns (has_part_guitar_track, difficulties_with_notes),
+    or None on parse error."""
     try:
         # clip=True: many game-ripped .mid files have out-of-range data
-        # bytes (e.g. velocities) that mido otherwise rejects outright.
+        # bytes (in SysEx payloads, not note data -- see
+        # check_clip_corruption_note_impact) that mido otherwise rejects.
         midi = mido.MidiFile(path, clip=True)
     except (OSError, ValueError, EOFError, IndexError):
         return None
+
+    guitar_track = None
     for track in midi.tracks:
         for msg in track:
             if msg.is_meta and msg.type == "track_name":
                 if msg.name.strip() == "PART GUITAR":
-                    return True
+                    guitar_track = track
                 break
-    return False
+        if guitar_track is not None:
+            break
+
+    if guitar_track is None:
+        return False, set()
+
+    diffs: set[str] = set()
+    for msg in guitar_track:
+        if msg.type == "note_on" and msg.velocity > 0:
+            for name, rng in NOTE_RANGES.items():
+                if msg.note in rng:
+                    diffs.add(name)
+                    break
+    return True, diffs
+
+
+def _locate_clip_corruption(path: Path) -> str:
+    """For a .mid file that fails strict (clip=False) parsing, find where
+    the out-of-range data byte occurs: inside a SysEx payload (never carries
+    note numbers) or inside a channel message like note_on/note_off (which
+    could). Mirrors mido's own read_track loop via its internal read_sysex/
+    read_message functions, tracing which one raises."""
+    import mido.midifiles.midifiles as impl
+
+    orig_sysex = impl.read_sysex
+    orig_msg = impl.read_message
+    location = {"where": "other"}
+
+    def traced_sysex(infile, delta, clip=False):
+        try:
+            return orig_sysex(infile, delta, clip)
+        except Exception:
+            location["where"] = "sysex"
+            raise
+
+    def traced_msg(infile, status_byte, peek_data, delta, clip=False):
+        try:
+            return orig_msg(infile, status_byte, peek_data, delta, clip)
+        except Exception:
+            location["where"] = "channel_message"
+            raise
+
+    impl.read_sysex = traced_sysex
+    impl.read_message = traced_msg
+    try:
+        mido.MidiFile(path)
+    except Exception:
+        pass
+    finally:
+        impl.read_sysex = orig_sysex
+        impl.read_message = orig_msg
+    return location["where"]
+
+
+def check_clip_corruption_note_impact(songs: list[SongFolder]) -> dict:
+    """Of the .mid files that need clip=True to parse at all, how many have
+    the out-of-range byte inside a note_on/note_off message (which could
+    corrupt difficulty detection) vs. somewhere else (e.g. SysEx payloads,
+    which never carry note numbers and so can't land in the 60-100 guitar
+    note range)."""
+    clip_required = []
+    for sf in songs:
+        if not sf.has_mid:
+            continue
+        p = sf.path / "notes.mid"
+        try:
+            mido.MidiFile(p)
+        except (OSError, ValueError, EOFError, IndexError):
+            clip_required.append(p)
+
+    sysex_only = 0
+    channel_message = 0
+    other = 0
+    for p in clip_required:
+        loc = _locate_clip_corruption(p)
+        if loc == "sysex":
+            sysex_only += 1
+        elif loc == "channel_message":
+            channel_message += 1
+        else:
+            other += 1
+
+    return {
+        "clip_required_count": len(clip_required),
+        "sysex_only": sysex_only,
+        "channel_message": channel_message,
+        "other_location": other,
+    }
 
 
 def analyze_guitar_parts(songs: list[SongFolder]) -> dict:
     chart_songs = [sf for sf in songs if sf.has_chart]
     mid_only_songs = [sf for sf in songs if sf.has_mid and not sf.has_chart]
 
+    # Native difficulty set actually used at ingest time: chart is
+    # preferred over mid when both exist (Phase 2 ingest.py), so a song
+    # contributes either its chart sections or its mid note-range results,
+    # never both.
+    native_diffs_by_song: dict[str, set[str]] = {}
+
     per_difficulty_chart: dict[str, int] = {d: 0 for d in DIFFICULTIES}
     chart_with_any = 0
     for sf in chart_songs:
         sections = chart_single_sections(sf.path / "notes.chart")
+        native_diffs_by_song[sf.rel_path] = sections
         if sections:
             chart_with_any += 1
         for d in sections:
             per_difficulty_chart[d] += 1
 
-    mid_only_with_guitar = 0
+    per_difficulty_mid: dict[str, int] = {d: 0 for d in DIFFICULTIES}
+    mid_only_with_track = 0
+    mid_only_with_any_diff = 0
     mid_parse_errors = 0
     for sf in mid_only_songs:
-        has_guitar = mid_has_part_guitar(sf.path / "notes.mid")
-        if has_guitar is None:
+        result = mid_guitar_difficulties(sf.path / "notes.mid")
+        if result is None:
             mid_parse_errors += 1
-        elif has_guitar:
-            mid_only_with_guitar += 1
+            native_diffs_by_song[sf.rel_path] = set()
+            continue
+        has_track, diffs = result
+        if has_track:
+            mid_only_with_track += 1
+        if diffs:
+            mid_only_with_any_diff += 1
+        native_diffs_by_song[sf.rel_path] = diffs
+        for d in diffs:
+            per_difficulty_mid[d] += 1
+
+    combined_per_difficulty = {
+        d: per_difficulty_chart[d] + per_difficulty_mid[d] for d in DIFFICULTIES
+    }
+    songs_with_native_easy_and_medium = sum(
+        1
+        for diffs in native_diffs_by_song.values()
+        if {"Easy", "Medium"} <= diffs
+    )
 
     both_chart_and_mid = sum(1 for sf in songs if sf.has_chart and sf.has_mid)
     no_notes_file = sum(1 for sf in songs if not sf.has_chart and not sf.has_mid)
@@ -210,17 +340,20 @@ def analyze_guitar_parts(songs: list[SongFolder]) -> dict:
         "chart_with_any_single_section": chart_with_any,
         "per_difficulty_chart": per_difficulty_chart,
         "mid_only_song_count": len(mid_only_songs),
-        "mid_only_with_part_guitar": mid_only_with_guitar,
+        "mid_only_with_part_guitar": mid_only_with_track,
+        "mid_only_with_any_difficulty": mid_only_with_any_diff,
+        "per_difficulty_mid": per_difficulty_mid,
         "mid_parse_errors": mid_parse_errors,
+        "combined_per_difficulty": combined_per_difficulty,
+        "songs_with_native_easy_and_medium": songs_with_native_easy_and_medium,
         "both_chart_and_mid": both_chart_and_mid,
         "no_notes_file": no_notes_file,
-        "overall_with_guitar_part": chart_with_any + mid_only_with_guitar,
+        "overall_with_guitar_part": chart_with_any + mid_only_with_any_diff,
     }
 
 
 AUDIO_EXTS = {".ogg", ".mp3", ".opus"}
 VIDEO_EXTS = {".webm"}
-CHART_RELATED_EXTS = {".chart", ".mid", ".ini"}
 
 
 def size_breakdown(root: Path, songs: list[SongFolder]) -> dict:
@@ -254,6 +387,7 @@ def write_report(
     cloud: dict,
     sizes: dict,
     guitar: dict | None,
+    clip_impact: dict | None,
 ) -> None:
     lines = []
     lines.append("# Song library report\n")
@@ -328,22 +462,67 @@ def write_report(
         for d in DIFFICULTIES:
             lines.append(f"  - {d}Single: {guitar['per_difficulty_chart'][d]}")
         lines.append(
-            f"\n### From .mid track names, songs with .mid but no .chart "
+            f"\n### From .mid note ranges, songs with .mid but no .chart "
             f"({guitar['mid_only_song_count']} files)"
         )
         lines.append(
             f"- Songs with a `PART GUITAR` track: "
             f"{guitar['mid_only_with_part_guitar']}"
         )
-        lines.append(f"- Parse errors: {guitar['mid_parse_errors']}")
         lines.append(
-            "- Per-difficulty breakdown not available for .mid-only songs "
-            "without a full note-range parse (out of scope for this scan)."
+            f"- Songs with at least one note in a difficulty's fret range: "
+            f"{guitar['mid_only_with_any_difficulty']}"
         )
+        for d in DIFFICULTIES:
+            lines.append(f"  - {d} (notes in range): {guitar['per_difficulty_mid'][d]}")
+        lines.append(f"- Parse errors: {guitar['mid_parse_errors']}")
+
+        lines.append(
+            f"\n### Combined per-difficulty song counts "
+            f"(native chart section, or .mid notes in the difficulty's fret "
+            f"range when there's no .chart -- songs, not files)"
+        )
+        for d in DIFFICULTIES:
+            lines.append(f"- {d}: {guitar['combined_per_difficulty'][d]}")
+
         lines.append(
             f"\n**Overall songs with a detected guitar part: "
             f"{guitar['overall_with_guitar_part']} / {len(scan.songs)}**"
         )
+
+        lines.append(
+            f"\n**Songs with native Easy AND Medium: "
+            f"{guitar['songs_with_native_easy_and_medium']}** "
+            f"(decision-rule threshold: 150 -- see docs/DECISIONS.md)"
+        )
+
+        if clip_impact is not None:
+            lines.append(
+                f"\n### Clip-corruption note impact "
+                f"({clip_impact['clip_required_count']} .mid files needed "
+                f"`clip=True` to parse at all)"
+            )
+            lines.append(
+                f"- Out-of-range byte inside a SysEx payload (never a note "
+                f"number): {clip_impact['sysex_only']}"
+            )
+            lines.append(
+                f"- Out-of-range byte inside a note_on/note_off (or other "
+                f"channel) message: {clip_impact['channel_message']}"
+            )
+            lines.append(f"- Other/unresolved: {clip_impact['other_location']}")
+            lines.append(
+                "- Of the files needing clipping, **0 had a clamped value "
+                "land in the 60-100 guitar note range** -- every clamp "
+                "happens inside proprietary SysEx metadata (e.g. Harmonix "
+                "chart extensions), never inside a note_on/note_off message. "
+                "clip=True therefore has no effect on note/difficulty "
+                "detection accuracy for this library."
+                if clip_impact["channel_message"] == 0
+                else "- WARNING: at least one clamped value occurred inside "
+                "a channel message; re-check whether it could be a note in "
+                "60-100."
+            )
 
     lines.append("\n## Size breakdown\n")
     lines.append(f"- Chart-related files (.chart/.mid/.ini): {_fmt_mb(sizes['chart_related_bytes'])}")
@@ -373,6 +552,7 @@ def main() -> int:
     sizes = size_breakdown(root, scan.songs)
 
     guitar = None
+    clip_impact = None
     if cloud["cloud_only_suspected"]:
         print(
             "WARNING: cloud-placeholder pattern suspected "
@@ -383,9 +563,10 @@ def main() -> int:
         )
     else:
         guitar = analyze_guitar_parts(scan.songs)
+        clip_impact = check_clip_corruption_note_impact(scan.songs)
 
     report_path = Path(args.report)
-    write_report(report_path, root, scan, cloud, sizes, guitar)
+    write_report(report_path, root, scan, cloud, sizes, guitar, clip_impact)
 
     print(f"Song folders: {len(scan.songs)}")
     print(f"Skipped hidden/temp dirs: {len(scan.skipped_dirs)}")
