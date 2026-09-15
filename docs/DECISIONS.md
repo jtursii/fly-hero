@@ -9,3 +9,4 @@
 - D7: Out of scope: the real Clone Hero game, screen capture, CGEvents.
 - D8: The web viewer plays precomputed replays; no live inference in the browser.
 - D9 (default; user to confirm before Phase 7): the public site hosts no song audio and no original chart files. Replays show title/artist/charter credit, the highway, and brain activity, with synthesized per-lane hit sounds. A local-only "load your own audio file" option may sync real audio in the browser without uploading or hosting it.
+- D10: shared, cross-phase utility code (YAML config loader, run-dir helper) lives in `flyhero/utils/` (`config.py`, `run.py`). Added to the repo layout in PLAN.md during Phase 0 since the original layout diagram had no home for code used by every later package.

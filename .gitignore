@@ -1,0 +1,9 @@
+data/
+runs/
+configs/paths.yaml
+web/node_modules/
+web/dist/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

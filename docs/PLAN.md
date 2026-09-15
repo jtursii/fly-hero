@@ -22,6 +22,7 @@ fly-brain-hero/
 ├── runs/                    # gitignored
 ├── scripts/status.sh
 ├── flyhero/
+│   ├── utils/               # config.py run.py — shared config loader + run-dir helper
 │   ├── library/             # scan.py
 │   ├── connectome/          # download.py build_graph.py inspect.py shuffle.py
 │   ├── game/                # song.py chart_parser.py midi_parser.py ingest.py rules.py labels.py render.py retina.py sim.py env.py
