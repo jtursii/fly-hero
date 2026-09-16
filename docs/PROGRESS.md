@@ -1,6 +1,10 @@
 # Progress
 
 ## Current phase
+Phase 3b — diagnostics complete (memory benchmark, chaos check), build plan
+(bc.py/baseline_gru.py/decoder.py/curriculum/resumability/logging) presented
+to the user for approval, not yet implemented. See the Log entry below.
+
 Phase 3a — **complete**. rate_model.py, readout.py, D16 hybrid gain grouping,
 torch retina port, bench/bench_brain.py, and the gain0 stability sweep are
 all done and tested. Gate G3's benchmark portion **PASSES** (mps/float32).
@@ -30,6 +34,16 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
 
 ## Log
 <!-- newest first: date — task — outcome — deviations — repro command -->
+- 2026-09-16 — **Phase 3b diagnostics: real-config memory benchmark + chaos check — both clear, build plan pending approval** —
+  - **New files:** `scripts/bench_train_memory.py`, `scripts/chaos_check.py`, `docs/chaos_check.md`.
+  - **Memory benchmark** (`scripts/bench_train_memory.py`, mps/float32, real train-split songs, subprocess-isolated per cell per D23): under the *actual* bc.py loop shape (1s burn-in under `no_grad`, then a 2s gradient window forward+backward, not `bench_brain.py`'s uniform-grad 1s measurement) -- **batch=8 no checkpoint: 3.198s, 47.52 GiB (exceeds the 40GB bound)**; **batch=8 with per-frame gradient checkpointing (`torch.utils.checkpoint` around `brain.frame_step`): 2.168s, 2.11 GiB**; **batch=4 no checkpoint: 0.945s, 26.42 GiB**. Both checkpointed-batch=8 and batch=4 clear 40GB; by raw elapsed time, batch=4-no-checkpoint is faster (0.945s vs 2.168s), though normalized by batch size batch=4 (4.23 samples/s) and batch=8-checkpointed (3.69 samples/s) are close. **Key finding**: naive batch=8 (Gate G3's benchmark config) does *not* fit under 40GB once the real 2s BC training window (not the 1s benchmark window) is accounted for -- checkpointing or a smaller batch is required, not optional. Final choice deferred to the Phase 3b build plan's approval (not yet written to `configs/brain.yaml`/DECISIONS.md).
+  - **Chaos check** (`scripts/chaos_check.py`, gain0=10.0, bias_init=0.005 -- current `configs/brain.yaml` values):
+    - **(a) Reliability**: same 5s train-split Medium segment ("Steve Ouimette - The Devil Went Down to Georgia"), run twice from two different 2s burn-ins ("System of a Down - Toxicity", "No Doubt - Excuse Me Mr."). Mean per-DN Pearson correlation over the last 3s: **1.0000** (376/1303 DNs had nonzero variance to correlate on; the rest sit constant, consistent with the Phase 3a sweep's `reach_frac≈0.30`). The two runs' last-3s traces are **bit-identical** (`max_abs_diff=0.0`), not just highly correlated -- explained mechanistically, not a bug: at `tau_init=0.05s` (min `0.02s`), each dt=1/120s substep decays carried-over state by a factor of ~0.83 (~0.58 at the tau floor); over the ~240 substeps before the "last 3s" window starts, any difference from the burn-in state underflows float32 to exactly 0 well within the first second. This confirms PLAN's 1s burn-in (used 2s here, even more margin) is more than sufficient to erase initial-state dependence at the current gain0/tau_init -- **passes** (threshold 0.5).
+    - **(b) Perturbation**: 3s blank highway (D24), with vs. without Gaussian noise added to the photoreceptor input current (std = 1% of a typical input magnitude, measured empirically at 0.1569 over the first 20s of a real song rather than assumed -- an earlier version of this measurement used only the first 3s and got a spuriously tiny 1.7e-8 because that song's intro has no notes on screen yet, fixed before reporting). Relative DN divergence at 3s: **0.0387** (3.9%) -- small, no blow-up. **No numeric gate was specified for this check by the user** -- reported as a raw number, flagged as an open ambiguity rather than silently pass/failed.
+    - **(c)** Read (not re-run) `docs/gain0_stability.md`'s existing per-gain0 results: **gain0=10.0 and 30.0 PASS; 0.1/0.3/1.0/3.0 FAIL** (unchanged from Phase 3a's D25 sweep).
+  - Neither check triggered invariant 7's stop condition (reliability ≥0.5, no NaN/blow-up) -- proceeded to present the Phase 3b build plan.
+  - **Confirmed** `tests/test_rate_model.py::test_mps_forward_backward_matches_cpu` and `::test_gradcheck_float64_cpu` exist, are not skipped (MPS available on this machine), and pass. `uv run pytest -q`: 50 passed (unchanged).
+  - Repro: `PYTHONPATH=. uv run python scripts/bench_train_memory.py` (background, ~10s); `PYTHONPATH=. uv run python scripts/chaos_check.py` (background, ~2min) → `docs/chaos_check.md`; `uv run pytest -q -k "mps_forward_backward or gradcheck_float64" tests/test_rate_model.py`.
 - 2026-09-16 — **Phase 3a: rate_model.py, readout.py, D16 gain grouping, torch retina, bench_brain.py — benchmark PASS; stability sweep STOPPED, pending decision** —
   - **New files:** `flyhero/brain/{__init__,rate_model,readout}.py`, `flyhero/game/retina_torch.py`, `bench/bench_brain.py`, `scripts/gain0_sweep.py`, `configs/brain.yaml`, `tests/{test_rate_model,test_readout,test_retina_torch}.py`.
   - **`rate_model.py`:** `ConnectomeBrain` implements PLAN's leaky-integrator update exactly (invariant 3: topology/synapse counts/signs are fixed buffers; only per-type `tau`/`bias` and per-gain-group `g` are `nn.Parameter`s). `graph.npz` doesn't store `gain_group_id` (D16 said deriving it is Phase 3's job) -- `compute_gain_group_id` derives it from `pair_id`/`type_id`/`super_class_id` at construction time, fully vectorized (no per-edge Python loop; the real graph has 2.7M edges). Verified against `graph_meta.json`'s `hybrid_gain_sharing` report at k=2: **244,824 fine + 18,925 coarse = 263,749 groups**, exact match (real-data regression test).
@@ -122,6 +136,8 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
   - Repro: `uv run pytest -q`; `uv run python -m flyhero.library.scan --config configs/paths.yaml` → `docs/library_report.md`.
 
 ## Open issues
+- Phase 3b memory-config decision (batch=8+checkpoint vs. batch=4, both <=40GB) not yet written to `configs/brain.yaml`/DECISIONS.md as D26 -- deferred until the Phase 3b build plan is approved. See the 2026-09-16 diagnostics log entry for the numbers.
+- Chaos check's perturbation divergence (3.9% at 3s) has no numeric gate from the user -- flagged as an ambiguity for the Phase 3b build plan rather than assumed pass/fail.
 - ~~Gate G3's stability sweep is blocked, pending the user's decision~~ — **Resolved** (D25): `bias_init=0.005` restores DN signal reach without saturating the active-fraction check; `gain0=10.0` chosen. See the 2026-09-16 close-out log entry and `docs/gain0_stability.md`.
 - The `.chart`-only Expert skew noted after Phase 0 was resolved by the native-difficulty check above: 293 songs have native Easy+Medium once `.mid` files are included, well over the 150 threshold, so no curriculum-data risk.
 - ~~Phase 2: stratify the song train/val/test split by "has native Easy/Medium" vs. "Expert-only"~~ — **Resolved** in the Phase 2 tasks 1-5 log entry above: `ingest.py` stratifies by `native_easy_medium` vs `expert_only` at the (normalized-duplicate) group level.
