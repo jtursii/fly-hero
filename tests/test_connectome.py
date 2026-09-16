@@ -17,6 +17,7 @@ from flyhero.connectome.shuffle import degree_preserving_shuffle
 
 ROOT_IDS = [1, 2, 3, 4, 5, 6]
 REAL_GRAPH_PATH = Path("data/processed/graph.npz")
+REAL_GRAPH_SHUFFLED_PATH = Path("data/processed/graph_shuffled.npz")
 
 
 def _write_fixtures(tmp_path):
@@ -271,14 +272,17 @@ def test_shuffle_actually_changes_targets():
 
 
 @pytest.mark.skipif(
-    not REAL_GRAPH_PATH.exists(),
-    reason="requires the real graph.npz built from the downloaded FlyWire v783 data",
+    not (REAL_GRAPH_PATH.exists() and REAL_GRAPH_SHUFFLED_PATH.exists()),
+    reason="requires the real graph.npz/graph_shuffled.npz built from the downloaded FlyWire v783 data",
 )
-def test_real_graph_has_no_nan_positions():
-    """No node in the real connectome graph should be left without a
-    resolvable position, and photoreceptors without an in-volume soma must
-    have fallen back to the anchor point rather than gone unresolved."""
-    graph = np.load(REAL_GRAPH_PATH)
+@pytest.mark.parametrize("graph_path", [REAL_GRAPH_PATH, REAL_GRAPH_SHUFFLED_PATH])
+def test_real_graph_has_no_nan_positions(graph_path):
+    """No node in the real connectome graph (nor its degree-preserving-shuffled
+    control, which must carry the same per-node position data unchanged) should
+    be left without a resolvable position, and photoreceptors without an
+    in-volume soma must have fallen back to the anchor point rather than gone
+    unresolved."""
+    graph = np.load(graph_path)
 
     assert not np.isnan(graph["pos_voxel"]).any()
     assert not np.isnan(graph["pos_nm"]).any()
