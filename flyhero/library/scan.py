@@ -27,6 +27,7 @@ from pathlib import Path
 import mido
 
 from flyhero.utils.config import load_config
+from flyhero.utils.text import read_text_lenient
 
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Expert")
 SAMPLE_SIZE = 40
@@ -143,22 +144,13 @@ def check_cloud_status(songs: list[SongFolder], sample_size: int = SAMPLE_SIZE) 
     }
 
 
-def _read_text_lenient(path: Path) -> str:
-    for enc in ("utf-8", "utf-8-sig", "cp1252"):
-        try:
-            return path.read_text(encoding=enc)
-        except UnicodeDecodeError:
-            continue
-    return path.read_text(encoding="latin-1", errors="replace")
-
-
 _SECTION_RE = re.compile(r"^\[(Easy|Medium|Hard|Expert)Single\]\s*$", re.MULTILINE)
 
 
 def chart_single_sections(path: Path) -> set[str]:
     """Which of the four [*Single] section headers exist in a .chart file.
     Only scans for section header lines; does not parse notes."""
-    text = _read_text_lenient(path)
+    text = read_text_lenient(path)
     return {m.group(1) for m in _SECTION_RE.finditer(text)}
 
 
