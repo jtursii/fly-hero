@@ -1,0 +1,42 @@
+processed_dir: "data/processed"
+
+# Euler integration, 2 substeps per 60Hz game frame (PLAN Phase 3 task 1).
+dt: 0.008333333  # 1/120
+substeps_per_frame: 2
+
+tau_init_s: 0.05
+tau_min_s: 0.02
+
+# D16: fine (one g per realized (pre_type,post_type) pair) / coarse (one g
+# per (pre_type,post_super_class)) / hybrid (default: fine if a pair has
+# >=k edges, else falls back to its coarse bucket). k=2 is the largest
+# threshold with fine-pair edge coverage >=90% on the real graph (measured
+# 93.85%, see docs/graph_report.md / graph_meta.json's hybrid_gain_sharing).
+gain_sharing: "hybrid"
+gain_sharing_k: 2
+
+# Placeholder until scripts/gain0_sweep.py picks a value that keeps
+# untrained activity stable (see docs/gain0_stability.md once written).
+gain0: 1.0
+
+readout:
+  n_actions: 6  # 5 frets + strum
+
+stability_sweep:
+  # Log-spaced candidates spanning clearly-too-quiet to clearly-saturated,
+  # so the sweep can locate whatever regime keeps 1-30% of neurons active.
+  gain0_values: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+  song_duration_s: 10.0
+  active_r_threshold: 0.01       # r > this counts as "active"
+  active_frac_min: 0.01
+  active_frac_max: 0.30
+  reach_threshold: 0.01          # |r_real - r_blank| above this counts as "reached"
+  reach_frac_min: 0.10           # hard-stop bar (invariant 7): DN reach must clear this
+
+bench:
+  devices: ["cpu", "mps"]
+  dtypes: ["float32", "float16"]
+  batches: [1, 8, 32]
+  min_syn_values: [5, 10]
+  game_seconds: 1.0
+  full_pipeline_batch: 8
