@@ -16,11 +16,11 @@ At the start of every session, read `docs/PROGRESS.md` and only the current phas
 5. Train/val/test splits are **by song**. All difficulties of a song live in one split. Evaluation and showcase songs come from the test split.
 6. Controls (shuffled connectome, readout-only) use the identical code path, config, and training budget as the real model.
 7. Never fake, hand-edit, or silently "fix" results, and never weaken, skip, or delete tests. If an acceptance gate fails: stop, record it in PROGRESS.md, propose a fallback from the plan, and ask.
-8. The song library is **read-only**. Never write, move, rename, or delete anything in it, and never copy song audio into the repo or `web/`.
+8. The song library is **read-only**: never write, move, rename, or delete anything in it. Song audio may be copied out of it into `media/` for local use (e.g. muxing into a debug video); `media/` is gitignored, audio is never committed to git, and it never goes under `web/` (Phase 7 still follows D9 unless the user changes it) (D22).
 
 ## Paths
 - Song library: `song_library` in `configs/paths.yaml` (gitignored; created in Phase 0 from the path the user gives).
-- `data/` (raw + processed) and `runs/` are gitignored.
+- `data/` (raw + processed), `runs/`, and `media/` are gitignored.
 
 ## Stack
 - Python 3.12 via `uv`; PyTorch (MPS or CPU, chosen by benchmark); mido; polars/pyarrow; gymnasium; pytest; TensorBoard.

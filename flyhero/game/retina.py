@@ -254,6 +254,7 @@ def calibrate_medulla_flip(graph, type_names: list[str]) -> tuple[bool, dict]:
             "chosen_median_distance_lattice_spacings": (
                 median_flipped if flip else median_unflipped
             ),
+            "lattice_spacing": dict(lattice_spacing),
         }
     )
     return flip, result
@@ -319,6 +320,103 @@ def build_photoreceptor_map(graph, type_names: list[str]) -> PhotoreceptorMap:
     included_mask = included_mask & ~unresolved
 
     return PhotoreceptorMap(photo_idx, included_mask, image_pos, medulla_flip, calibration_report)
+
+
+def validate_retinotopy(
+    graph, type_names: list[str], photo_map: PhotoreceptorMap, n_null_pairs: int = 1000, seed: int = 0
+) -> dict:
+    """Two checks that were NOT used to calibrate the projection (run after
+    the PCA fit and the medulla flip are already fixed) -- they validate the
+    result, they don't tune it:
+
+    (a) Null baseline: median image distance for `n_null_pairs` RANDOMLY
+        paired R1-6/R8 cells (same side, fixed seed), in the same L1-lattice
+        units as the matched-pair (Mi1-sharing) calibration median. If the
+        connectivity check found a genuine retinotopic correspondence and
+        not an artifact of the projection method itself, random pairs must
+        be much farther apart than matched ones (required: >=5x).
+
+    (b) Superposition check: for each L1 cell, the image-position spread
+        (median pairwise distance) of its presynaptic R1-6 cells -- these
+        are ~6 cells from different physical ommatidia that neural
+        superposition wires to one lamina cartridge, so if the projection
+        captures real visual-field position (not raw retinal position) they
+        should cluster tightly (expected: <1.5 lattice spacings). Not used
+        for calibration -- reported honestly, nothing here is tuned to it.
+    """
+    name_to_id = {n: i for i, n in enumerate(type_names)}
+    pre, post, type_id, side_id = graph["pre"], graph["post"], graph["type_id"], graph["side_id"]
+    r16_id = name_to_id.get("R1-6")
+    l1_id = name_to_id.get("L1")
+    r8_id = name_to_id.get("R8")
+
+    lattice_spacing = photo_map.calibration_report.get("lattice_spacing", {})
+    matched_median = photo_map.calibration_report.get(
+        "chosen_median_distance_lattice_spacings", float("nan")
+    )
+
+    slot_of: dict[int, int] = {
+        int(node_idx): slot
+        for slot, node_idx in enumerate(photo_map.photoreceptor_idx)
+        if photo_map.included_mask[slot] and not np.isnan(photo_map.image_pos[slot, 0])
+    }
+
+    # --- (a) null baseline: random R1-6/R8 pairs, same side ---
+    r16_by_side: dict[int, list[int]] = {SIDE_LEFT: [], SIDE_RIGHT: []}
+    r8_by_side: dict[int, list[int]] = {SIDE_LEFT: [], SIDE_RIGHT: []}
+    for node_idx, slot in slot_of.items():
+        side = int(side_id[node_idx])
+        if side not in (SIDE_LEFT, SIDE_RIGHT):
+            continue
+        if type_id[node_idx] == r16_id:
+            r16_by_side[side].append(slot)
+        elif type_id[node_idx] == r8_id:
+            r8_by_side[side].append(slot)
+
+    rng = np.random.default_rng(seed)
+    sides_avail = [s for s in (SIDE_LEFT, SIDE_RIGHT) if r16_by_side[s] and r8_by_side[s]]
+    null_distances = np.zeros(n_null_pairs)
+    for i in range(n_null_pairs):
+        side = sides_avail[rng.integers(0, len(sides_avail))]
+        a = r16_by_side[side][rng.integers(0, len(r16_by_side[side]))]
+        b = r8_by_side[side][rng.integers(0, len(r8_by_side[side]))]
+        d = float(np.linalg.norm(photo_map.image_pos[a] - photo_map.image_pos[b]))
+        null_distances[i] = d / lattice_spacing[side]
+    null_median = float(np.median(null_distances))
+
+    # --- (b) superposition: R1-6 cells presynaptic to the same L1 ---
+    pre_of = _build_pre_of(pre, post)
+    l1_indices = np.nonzero(type_id == l1_id)[0]
+    per_l1_spreads: list[float] = []
+    for l1 in l1_indices.tolist():
+        r16_slots = [
+            slot_of[p] for p in pre_of.get(l1, []) if type_id[p] == r16_id and p in slot_of
+        ]
+        if len(r16_slots) < 2:
+            continue
+        side = int(side_id[l1])
+        if side not in lattice_spacing:
+            continue
+        pts = photo_map.image_pos[r16_slots]
+        n = len(pts)
+        dists = [
+            float(np.linalg.norm(pts[i] - pts[j])) / lattice_spacing[side]
+            for i in range(n)
+            for j in range(i + 1, n)
+        ]
+        per_l1_spreads.append(float(np.median(dists)))
+    superposition_median = float(np.median(per_l1_spreads)) if per_l1_spreads else float("nan")
+
+    return {
+        "matched_pair_median": matched_median,
+        "null_baseline_median": null_median,
+        "null_baseline_ratio": (null_median / matched_median) if matched_median > 0 else float("inf"),
+        "null_baseline_pass": bool(null_median >= 5 * matched_median),
+        "n_null_pairs": n_null_pairs,
+        "superposition_median": superposition_median,
+        "n_l1_cells_tested": len(per_l1_spreads),
+        "superposition_pass": bool(superposition_median < 1.5),
+    }
 
 
 def gaussian_blur(frame: np.ndarray, sigma: float = 1.0, kernel_size: int = 5) -> np.ndarray:

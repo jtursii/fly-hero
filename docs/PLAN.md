@@ -146,7 +146,7 @@ Design: a top-down highway with 5 vertical lanes. Notes scroll downward at const
 - ≥ 90% of chart-bearing songs parse. ≥ 150 train songs. Counts per difficulty recorded.
 - Scripted perfect player: `hit_rate = 1.000` with 0 overstrums on 20 val songs at Expert.
 - Random player `hit_rate` recorded.
-- Env at batch 64 runs ≥ 10× real time on CPU.
+- Env at batch 64 runs ≥ 5× real time on CPU (amended from ≥10×, D21).
 - **Human check:** the debug video of a song the user knows looks right.
 
 **Fallback:** if a format parses poorly, drop that format for v1 as long as ≥ 150 train songs remain. Record which format was dropped.

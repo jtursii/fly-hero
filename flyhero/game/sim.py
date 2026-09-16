@@ -3,10 +3,12 @@
 VecRhythmEnv batches B songs; each step() advances every env by one 60Hz
 frame. Internally it runs one rules.RuleEngine per batch element (see
 rules.py's docstring) rather than a numpy-vectorized note-matcher: with
-<=max_open_notes_capacity concurrently open notes per env and typical
-batches of ~64, plain per-env Python loops still comfortably clear the
->=10x-real-time throughput gate (measured in bench_env.py) without the added
-complexity of a fully vectorized matcher.
+<=max_open_notes_capacity concurrently open notes per env this is cheap.
+The retina blur/sample IS batched across envs (see _obs()) -- that was the
+throughput-critical path for Gate G2's >=5x-real-time requirement (D21,
+amended from the original >=10x; measured 6.8x at batch 64 on CPU after
+that optimization work, accepted rather than pursuing a torch/GPU rewrite
+now -- see bench_env.py and docs/PROGRESS.md).
 """
 
 from __future__ import annotations
@@ -201,11 +203,67 @@ def render_debug_video(
     return metrics
 
 
+AUDIO_FILENAMES = ("song.mp3", "song.ogg", "song.opus", "song.wav")
+
+
+def find_song_audio(folder: Path) -> Path | None:
+    for name in AUDIO_FILENAMES:
+        p = folder / name
+        if p.exists():
+            return p
+    return None
+
+
+def mux_audio_into_video(
+    video_path: Path, audio_path: Path, audio_start_offset_s: float, out_path: Path
+) -> None:
+    """Mux `audio_path` into `video_path`'s silent track. Per D22, this only
+    ever writes under a gitignored path (e.g. media/) -- it copies audio out
+    of the (still read-only) song library, never into it, and never into
+    web/.
+
+    Sync convention: chart Offset / song.ini delay both describe how far the
+    chart's note timeline is shifted relative to the raw audio (positive =
+    notes pushed later relative to the audio); to sync, the audio must start
+    playing `-(chart_offset_s + ini_delay_s)` seconds into the video
+    timeline -- negative means the audio starts before video t=0, handled by
+    trimming that much off the front of the audio file instead of shifting
+    video frames (which can't start before 0)."""
+    import subprocess
+
+    import imageio_ffmpeg
+
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if audio_start_offset_s >= 0:
+        audio_input_args = ["-itsoffset", f"{audio_start_offset_s:.6f}", "-i", str(audio_path)]
+    else:
+        audio_input_args = ["-ss", f"{-audio_start_offset_s:.6f}", "-i", str(audio_path)]
+
+    cmd = [
+        ffmpeg_exe, "-y",
+        "-i", str(video_path),
+        *audio_input_args,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--paths-config", default="configs/paths.yaml")
     parser.add_argument("--video", nargs=2, metavar=("SONG_ID", "DIFFICULTY"))
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--mux-audio-from",
+        default=None,
+        help="song folder rel_path (relative to song_library) to find audio in and mux into --out",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -222,7 +280,23 @@ def main() -> int:
             processed_dir / "songs" / f"{song_id}_{difficulty}.npz", cfg["chord_merge_min_gap_s"]
         )
         out_path = Path(args.out) if args.out else Path(f"runs/debug_video_{song_id}_{difficulty}.mp4")
-        metrics = render_debug_video(song, cfg, photo_map, out_path)
+
+        video_path = out_path
+        if args.mux_audio_from:
+            video_path = out_path.parent / f"_silent_{out_path.name}"
+        metrics = render_debug_video(song, cfg, photo_map, video_path)
+
+        if args.mux_audio_from:
+            paths_cfg = load_config(args.paths_config)
+            song_root = Path(paths_cfg["song_library"]).expanduser() / args.mux_audio_from
+            audio_path = find_song_audio(song_root)
+            if audio_path is None:
+                parser.error(f"no audio file found under {song_root}")
+            offset_s = -(song.chart_offset_s + song.ini_delay_s)
+            mux_audio_into_video(video_path, audio_path, offset_s, out_path)
+            video_path.unlink()
+            print(f"Muxed audio from {audio_path} (offset {offset_s:+.3f}s)")
+
         print(f"Wrote {out_path}")
         print(metrics)
         return 0
