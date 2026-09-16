@@ -39,6 +39,7 @@ At the start of every session, read `docs/PROGRESS.md` and only the current phas
 - Never re-download or re-parse data that already exists in `data/processed/`.
 - Small commits, one per task. Tag each finished phase `phase-N-done`.
 - Type hints on public functions; comment tensor shapes, e.g. `# [B, N]`.
+- Push to origin after every commit that completes a task.
 
 ## End of every task
 Update `docs/PROGRESS.md` with what was done, gate numbers, deviations, open issues, and repro commands. Append new decisions to `docs/DECISIONS.md`. Commit.
