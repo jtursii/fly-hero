@@ -1,0 +1,27 @@
+raw_dir: "data/raw/connectome"
+processed_dir: "data/processed"
+
+sources:
+  connections:
+    url: "https://zenodo.org/records/10676866/files/proofread_connections_783.feather?download=1"
+    filename: "proofread_connections_783.feather"
+    size_bytes: 852022274
+  root_ids:
+    url: "https://zenodo.org/records/10676866/files/proofread_root_ids_783.npy?download=1"
+    filename: "proofread_root_ids_783.npy"
+    size_bytes: 1114168
+  annotations:
+    url: "https://raw.githubusercontent.com/flyconnectome/flywire_annotations/v3.1.0/supplemental_files/Supplemental_file1_neuron_annotations.tsv"
+    filename: "neuron_annotations_v3.1.0.tsv"
+    size_bytes: null # GitHub doesn't send a reliable Content-Length in all cases; checked via HEAD at download time instead
+
+min_syn: 5
+nt_conf_threshold: 0.5
+
+# Placeholder cell_type spellings; confirmed/corrected against the live
+# annotations file during Phase 1 inspect.py before Gate G1 is finalized.
+input_layer:
+  photoreceptor_cell_types: ["R1-6", "R7", "R8"]
+  fallback_cell_types: ["L1", "L2", "L3"]
+
+t4t5_cell_types: ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]

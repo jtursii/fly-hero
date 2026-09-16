@@ -1,19 +1,28 @@
 # Progress
 
 ## Current phase
-Phase 0 — done. Ready for Phase 1.
+Phase 1 — done. Ready for Phase 2.
 
 ## Gate results
 | Gate | Status | Numbers | Date |
 |---|---|---|---|
 | G0 | PASS | `uv run pytest -q`: 3 passed. `torch.backends.mps.is_available()` = True. Song folders: 652 (≥100 required). notes.chart: 306, notes.mid: 347, .sng: 0. | 2026-09-15 |
 | Native-difficulty check (pre-Phase-1) | PASS, no plan change | Songs with native Easy AND Medium: 293 (≥150 threshold). | 2026-09-15 |
+| G1 | PASS (with one flagged fallback trigger — see Open issues) | `uv run pytest -q`: 8 passed. Proofread root IDs (raw): 139,255. Final node set (proofread ∩ annotated): 139,241. Edges (min_syn=5, summed over neuropils): 2,700,429. Type pairs: 410,768 (**> 300k fallback threshold — flagged below, not yet applied**). DNs: 1,303 (≥100 required). Input layer: photoreceptors, 11,118 neurons (≥500 required); lamina fallback would have given 4,730. T4/T5 matched: 12,246. Full breakdown incl. D11-D15 provenance counts in `docs/graph_report.md`. | 2026-09-15 |
 
 ## Running jobs
 (none)
 
 ## Log
 <!-- newest first: date — task — outcome — deviations — repro command -->
+- 2026-09-15 — Phase 1: connectome graph — PASS (G1) —
+  - Downloaded (background, resumable via HTTP Range) from Zenodo record 10676866: `proofread_connections_783.feather` (852,022,274 B) and `proofread_root_ids_783.npy` (1,114,168 B); from `flyconnectome/flywire_annotations` pinned at tag `v3.1.0`: `Supplemental_file1_neuron_annotations.tsv` (31,718,505 B). Did not download `flywire_synapses_783.feather` (~9.5 GB) or the two `per_neuron_neuropil_count_*.feather` files — not needed by any Phase 1/3 task.
+  - Deviation from PLAN.md found and corrected during implementation: PLAN's download step named a standalone "v783 neurotransmitter predictions" file that does not exist. Per the user's approved D11-D13, NT sign now comes from the annotations' per-neuron `top_nt` (fallback: synapse-weighted mean of a neuron's outgoing per-edge NT columns from the connections table; photoreceptors forced to histamine; dopamine/serotonin/octopamine +1 for v1).
+  - Real-data bug caught before Gate G1 was finalized: `top_nt` in the live v3.1.0 TSV spells transmitters out in full (`acetylcholine`, `glutamate`, `dopamine`, `serotonin`, `octopamine`, `gaba`), not the short codes (`ach`, `glut`, ...) used by the connections table's per-edge columns. An initial run silently defaulted every `glutamate`/`acetylcholine`/etc. neuron to sign +1 via `replace_strict`'s default, which would have wrongly made all directly-predicted glutamatergic neurons excitatory. Fixed by normalizing `top_nt` to the short codes before sign lookup (`NT_NAME_ALIASES` in `build_graph.py`); added `test_top_nt_full_word_spellings_normalize_to_correct_sign` to catch a regression. Also found: empty-string `top_nt` values (602 raw rows) are not null in the polars-parsed column and were not triggering the fallback path until explicitly checked for.
+  - D11-D15 counts (full breakdown in `docs/graph_report.md`): `top_nt` used directly for 114,935 neurons; synapse-weighted fallback used for 23,387; no data at all (defaulted to ACh/+1) for 919. Histamine override applied to 11,118 photoreceptors (originally predicted: 6,958 ach, 2,863 glut, 769 gaba, 377 ser, 116 oct, 35 da). Type-ID fallback chain: 137,714 neurons at `cell_type`, 2 at `hemibrain_type`, 1,358 at `cell_class`, 167 singleton (9,028 distinct types total).
+  - Photoreceptor/lamina/T4-T5 `cell_type` spellings guessed in the plan (`R1-6`/`R7`/`R8`, `L1`/`L2`/`L3`, `T4a-d`/`T5a-d`) were verified exactly correct against the live TSV before being used.
+  - Shuffle (`connectome/shuffle.py`, double-edge-swap, factor 10x edges) verified on the real graph: in-degree, out-degree, sign, and syn_count arrays identical to `graph.npz`; 99.99% of postsynaptic targets changed; 0 duplicate edges; 0 self-loops introduced. Took 86s on 2.7M edges (under the 2-minute background threshold, ran in foreground).
+  - Repro: `uv run pytest -q`; `uv run python -m flyhero.connectome.download --config configs/connectome.yaml`; `uv run python -m flyhero.connectome.build_graph --config configs/connectome.yaml`; `uv run python -m flyhero.connectome.inspect --config configs/connectome.yaml` → `docs/graph_report.md`; `uv run python -m flyhero.connectome.shuffle --config configs/connectome.yaml`.
 - 2026-09-15 — Pre-Phase-1: per-difficulty note-range check on `.mid`-only songs — decision rule satisfied, no plan change —
   - Extended `flyhero/library/scan.py` to fully parse `PART GUITAR` note ranges (Easy 60-64, Medium 72-76, Hard 84-88, Expert 96-100) for the 346 `.mid`-only songs (`mid_guitar_difficulties`), and combined with the existing `.chart`-section counts into per-difficulty **song** counts (not file counts): Easy 294, Medium 294, Hard 294, Expert 652.
   - Decision rule (user-specified): amend Phase 2 to add `game/reduce.py` (derive Easy/Medium/Hard from Expert) only if fewer than 150 songs have **native** Easy AND Medium. Actual: **293** songs have both natively — rule satisfied, **no PLAN.md change**. (Native Easy/Medium coverage in this library comes almost entirely from `.mid` files — only 8 of 306 `.chart` files have non-Expert sections — but that's more than enough real lower-difficulty data for the Phase 3 curriculum.)
@@ -28,4 +37,7 @@ Phase 0 — done. Ready for Phase 1.
   - Repro: `uv run pytest -q`; `uv run python -m flyhero.library.scan --config configs/paths.yaml` → `docs/library_report.md`.
 
 ## Open issues
-(none — the `.chart`-only Expert skew noted after Phase 0 was resolved by the native-difficulty check above: 293 songs have native Easy+Medium once `.mid` files are included, well over the 150 threshold, so no curriculum-data risk.)
+- **Needs a decision before Phase 3:** the realized (pre_type, post_type) count is 410,768, over PLAN.md's 300k fallback threshold for Phase 1. Per PLAN, the specified fallback is to share gain `g` by `(pre_type, post_super_class)` instead. This does not block Phase 1 or Phase 2 — `graph.npz`'s `pair_id` still uses the full fine-grained (pre_type, post_type) scheme, so Phase 3's `rate_model.py` can either use it directly or derive a coarser gain-sharing key from `type_id`/`super_class_id` without rebuilding the graph. Ask the user which scheme to train with before Phase 3 starts.
+- The `.chart`-only Expert skew noted after Phase 0 was resolved by the native-difficulty check above: 293 songs have native Easy+Medium once `.mid` files are included, well over the 150 threshold, so no curriculum-data risk.
+- Phase 2: stratify the song train/val/test split by "has native Easy/Medium" vs. "Expert-only" so all three splits get a proportional share of native lower-difficulty songs, not just an even song-count split.
+- Phase 2: before deduping by (artist, title) in `game/ingest.py`, normalize both fields (lowercase, strip punctuation and bracketed/parenthetical suffixes like "(Live)") so near-duplicate entries collapse; write suspected duplicates (pairs that match post-normalization but not pre-normalization) to `docs/library_report.md` for the user's review rather than auto-merging or dropping them.
