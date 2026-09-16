@@ -1,9 +1,13 @@
 """Tests for scripts/render_gameplay_video.py's core correctness invariant:
 a rendered clip's hit_rate must equal bc.py's own eval hit_rate for that
 same checkpoint/song/excerpt (both go through train.bc.score_eval_entry,
-the single shared implementation -- see its docstring). Uses a real,
-already-trained GRU checkpoint (fast: no connectome forward/backward) from
-this session's resume-verification run.
+the single shared implementation -- see its docstring). Uses a freshly
+constructed GRU policy (fast: no connectome forward/backward) built from
+the repo's own configs -- the invariant under test is that the two code
+paths agree given the *same* weights, not that the weights are trained,
+so no run-specific checkpoint artifact is needed (those live under the
+gitignored, session-ephemeral runs/ dir and can't be relied on to survive
+across sessions).
 """
 
 from __future__ import annotations
@@ -22,17 +26,12 @@ from train.bc import build_policy, evaluate_difficulty, score_eval_entry
 from train.common import build_val_set
 
 REAL_DATA = Path("data/processed/graph.npz").exists() and Path("data/processed/splits.json").exists()
-CKPT_RUN_DIR = Path("runs/20260916_155821_resume_verify_gru")
-_REQUIRED = [CKPT_RUN_DIR / "checkpoint_latest.pt", CKPT_RUN_DIR / "bc.yaml", CKPT_RUN_DIR / "game.yaml"]
 
 
-@pytest.mark.skipif(
-    not (REAL_DATA and all(p.exists() for p in _REQUIRED)),
-    reason="requires real processed data and this session's resume_verify_gru checkpoint",
-)
+@pytest.mark.skipif(not REAL_DATA, reason="requires real processed data (data/processed/graph.npz, splits.json)")
 def test_rendered_clip_hit_rate_matches_eval_hit_rate():
-    cfg_bc = load_config(CKPT_RUN_DIR / "bc.yaml")
-    cfg_game = load_config(CKPT_RUN_DIR / "game.yaml")
+    cfg_bc = load_config("configs/bc.yaml")
+    cfg_game = load_config("configs/game.yaml")
     device, dtype = torch.device("cpu"), torch.float32
 
     processed_dir = Path(cfg_bc["processed_dir"])
@@ -42,8 +41,6 @@ def test_rendered_clip_hit_rate_matches_eval_hit_rate():
     env = VecRhythmEnv(cfg_game, photo_map)
 
     policy = build_policy("gru", cfg_bc, cfg_game, {}, photo_map, device, dtype)
-    ckpt = torch.load(CKPT_RUN_DIR / "checkpoint_latest.pt", map_location=device)
-    policy.load_state_dict(ckpt["model_state"])
     policy.eval()
 
     difficulty = "Medium"

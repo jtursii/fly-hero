@@ -257,6 +257,74 @@ def select_audio_stems(folder: Path, mix: str) -> list[Path]:
     )
 
 
+def compute_audio_start_offset_s(chart_offset_s: float, ini_delay_s: float, video_start_song_time_s: float = 0.0) -> float:
+    """The single source of truth for the chart-Offset/song.ini-delay sync
+    convention (D22/D29): chart Offset and song.ini delay both describe how
+    far the chart's note timeline is shifted relative to the raw audio file
+    (positive = notes pushed later relative to the audio) -- i.e. audio-file
+    time `a` corresponds to note/song time `a - (chart_offset_s +
+    ini_delay_s)`, so audio-file time 0 always occurs at song time
+    `-(chart_offset_s + ini_delay_s)`, regardless of which window of the song
+    a given video covers.
+
+    A video whose own time 0 corresponds to song time `video_start_song_time_s`
+    (0.0 for a full-song render starting at the song's own beginning; a val
+    excerpt's `excerpt_start_s` for an excerpt render -- NOT
+    `excerpt_start_s - burn_in`, since burn-in frames are simulated for
+    warm-up but never written into the rendered video, so the video's own
+    frame 0 is the excerpt's first frame, not the burn-in's) must therefore
+    start its audio at video time `-(chart_offset_s + ini_delay_s) -
+    video_start_song_time_s`. Negative means the audio starts before video
+    t=0, handled by `mux_audio_into_video` trimming that much off the front
+    of each stem (video frames can't start before 0)."""
+    return -(chart_offset_s + ini_delay_s) - video_start_song_time_s
+
+
+def generate_click_track_wav(
+    note_times_s: np.ndarray, chart_offset_s: float, ini_delay_s: float, out_path: Path,
+    sample_rate: int = 44100, click_hz: float = 1500.0, click_dur_s: float = 0.03,
+) -> None:
+    """Writes a mono 16-bit PCM WAV with one short decaying click burst at
+    each note's position on the *audio file's own timeline* (`note_time_s +
+    chart_offset_s + ini_delay_s` -- the inverse of
+    `compute_audio_start_offset_s`'s song-time-from-audio-time mapping), so
+    that muxing this file in alongside the real audio stems, with the exact
+    same `compute_audio_start_offset_s`-derived trim/delay applied uniformly to every
+    input, lands each click on its note's rendered video frame. Used by
+    `--audio clicks` to audibly verify chart-to-audio sync."""
+    import wave
+
+    if len(note_times_s) == 0:
+        audio_times_s = np.zeros(0, dtype=np.float64)
+    else:
+        audio_times_s = np.asarray(note_times_s, dtype=np.float64) + chart_offset_s + ini_delay_s
+        audio_times_s = audio_times_s[audio_times_s >= 0.0]
+
+    duration_s = float(audio_times_s.max()) + click_dur_s + 0.5 if len(audio_times_s) else 1.0
+    n_samples = int(round(duration_s * sample_rate))
+    buf = np.zeros(n_samples, dtype=np.float64)
+
+    click_n = int(round(click_dur_s * sample_rate))
+    t = np.arange(click_n) / sample_rate
+    click = np.sin(2 * np.pi * click_hz * t) * np.exp(-t / (click_dur_s / 5))
+
+    for at in audio_times_s:
+        start = int(round(at * sample_rate))
+        end = min(start + click_n, n_samples)
+        if end > start:
+            buf[start:end] += click[: end - start]
+
+    pcm = np.clip(buf, -1.0, 1.0)
+    pcm16 = (pcm * 32767.0).astype(np.int16)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(out_path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm16.tobytes())
+
+
 def mux_audio_into_video(
     video_path: Path, audio_paths: list[Path], audio_start_offset_s: float, out_path: Path
 ) -> None:
@@ -350,7 +418,7 @@ def main() -> int:
                 parser.error(str(e))
             if not audio_paths:
                 parser.error(f"no audio files found under {song_root}")
-            offset_s = -(song.chart_offset_s + song.ini_delay_s)
+            offset_s = compute_audio_start_offset_s(song.chart_offset_s, song.ini_delay_s)
             mux_audio_into_video(video_path, audio_paths, offset_s, out_path)
             video_path.unlink()
             stems_str = ", ".join(str(p) for p in audio_paths)

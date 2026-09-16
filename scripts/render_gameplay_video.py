@@ -21,9 +21,11 @@ difficulty -- the same 60s excerpt eval scores. An explicit song name is
 fuzzy-matched (flyhero/game/song_search.py) against val+test (never train
 unless --allow-train), listing matches if ambiguous.
 
-Audio: reuses flyhero/game/sim.py's stem-selection/muxing (D22/the existing
-Offset+delay sync convention), generalized to an excerpt that doesn't start
-at song time 0 (see _excerpt_audio_offset_s below).
+Audio: reuses flyhero/game/sim.py's stem-selection/muxing and
+compute_audio_start_offset_s (D22/D29's Offset+delay sync convention),
+passing the excerpt's own start time as the song-time instant that the
+rendered video's frame 0 corresponds to (burn-in frames are simulated for
+warm-up but never written into the video -- see main() below).
 """
 
 from __future__ import annotations
@@ -40,7 +42,13 @@ import torch
 from PIL import Image, ImageDraw
 
 from flyhero.game.retina import PhotoreceptorMap, build_photoreceptor_map
-from flyhero.game.sim import VecRhythmEnv, mux_audio_into_video, select_audio_stems
+from flyhero.game.sim import (
+    VecRhythmEnv,
+    compute_audio_start_offset_s,
+    generate_click_track_wav,
+    mux_audio_into_video,
+    select_audio_stems,
+)
 from flyhero.game.song import load_song_merged
 from flyhero.game.song_search import search_songs
 from flyhero.utils.config import load_config
@@ -58,7 +66,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("difficulty", nargs="?", default=None)
     p.add_argument("--ckpt", default=None, help="override checkpoint path (default: <run>/checkpoint_latest.pt)")
     p.add_argument("--allow-train", action="store_true")
-    p.add_argument("--audio", choices=["full", "guitar"], default="full")
+    p.add_argument(
+        "--full-song", action="store_true",
+        help="render/score the entire song instead of the fixed 60s note-dense excerpt (slow: no cap on frame count)",
+    )
+    p.add_argument(
+        "--audio", choices=["full", "guitar", "clicks"], default="full",
+        help="full: every stem, mixed equally. guitar: guitar stem only. "
+        "clicks: full mix + a synthesized click overlaid at each chart note's time (sync debugging).",
+    )
     p.add_argument(
         "--retina-panel", choices=["current", "raw"], default="current",
         help="current: signed adaptation-filtered current fed to the brain (default). "
@@ -80,6 +96,7 @@ def resolve_checkpoint(run_dir: Path, ckpt_arg: str | None) -> Path:
 
 def resolve_song_entry(
     processed_dir: Path, cfg_bc: dict, cfg_game: dict, difficulty: str, song_query: str | None, allow_train: bool,
+    full_song: bool = False,
 ) -> ValSongEntry:
     excerpt_s = cfg_bc["eval"]["excerpt_s"]
     if song_query is None:
@@ -104,6 +121,8 @@ def resolve_song_entry(
     song = load_song_merged(
         processed_dir / "songs" / f"{m.song_id}_{difficulty}.npz", cfg_game["chord_merge_min_gap_s"],
     )
+    if full_song:
+        return ValSongEntry(song=song, excerpt_start_s=0.0, excerpt_s=song.duration_s)
     if song.duration_s < excerpt_s:
         raise SystemExit(f"{m.display_name} is shorter ({song.duration_s:.1f}s) than the eval excerpt ({excerpt_s}s)")
     excerpt_start = find_note_dense_window(song.notes["time_s"], song.duration_s, excerpt_s)
@@ -295,17 +314,6 @@ def render_video_frames(
     return out_frames
 
 
-def _excerpt_audio_offset_s(chart_offset_s: float, ini_delay_s: float, window_start_s: float) -> float:
-    """Generalizes sim.py::render_debug_video's full-song convention ("audio
-    starts at video time -(chart_offset_s+ini_delay_s)", which assumes video
-    time 0 == song time 0) to a clip whose video time 0 == song time
-    `window_start_s`: the real-world instant "audio file time 0" always
-    occurs at song time -(chart_offset_s+ini_delay_s) regardless of which
-    window we're viewing, so in this clip's own video-time coordinates that
-    instant is at -(chart_offset_s+ini_delay_s) - window_start_s."""
-    return -(chart_offset_s + ini_delay_s) - window_start_s
-
-
 def main() -> None:
     args = parse_args()
     t_start = time.time()
@@ -339,7 +347,9 @@ def main() -> None:
     policy.load_state_dict(ckpt["model_state"])
     policy.eval()
 
-    entry = resolve_song_entry(processed_dir, cfg_bc, cfg_game, difficulty, args.song, args.allow_train)
+    entry = resolve_song_entry(processed_dir, cfg_bc, cfg_game, difficulty, args.song, args.allow_train, args.full_song)
+    if args.full_song and args.song is None:
+        entry = ValSongEntry(song=entry.song, excerpt_start_s=0.0, excerpt_s=entry.song.duration_s)
     print(f"song: {entry.song.artist} - {entry.song.title} (difficulty={difficulty}, excerpt starts at {entry.excerpt_start_s:.1f}s)")
 
     fps, hit_window_s = cfg_game["fps"], cfg_game["hit_window_s"]
@@ -395,12 +405,29 @@ def main() -> None:
 
     song_root = find_song_folder_by_id(library_root, song_id_cache, entry.song.song_id)
     if song_root is not None:
-        audio_paths = select_audio_stems(song_root, args.audio)
+        stem_mix = "full" if args.audio == "clicks" else args.audio
+        audio_paths = select_audio_stems(song_root, stem_mix)
+        click_path = None
+        if args.audio == "clicks":
+            click_path = out_path.parent / f"_clicks_{out_path.stem}.wav"
+            generate_click_track_wav(
+                entry.song.notes["time_s"], entry.song.chart_offset_s, entry.song.ini_delay_s, click_path,
+            )
+            audio_paths = audio_paths + [click_path]
         if audio_paths:
-            window_start = entry.excerpt_start_s - result["burn_in_actual"]
-            offset_s = _excerpt_audio_offset_s(entry.song.chart_offset_s, entry.song.ini_delay_s, window_start)
+            # video frame 0 == song time entry.excerpt_start_s -- NOT
+            # excerpt_start_s - burn_in, since burn-in frames are simulated
+            # for warm-up but never written into the video (see
+            # capture_visualization_frames: highway_frames only appends for
+            # f >= burn_in_frames). Using the burn-in-inclusive start here
+            # previously desynced audio by exactly burn_in_s (D29).
+            offset_s = compute_audio_start_offset_s(
+                entry.song.chart_offset_s, entry.song.ini_delay_s, entry.excerpt_start_s,
+            )
             mux_audio_into_video(silent_path, audio_paths, offset_s, out_path)
             silent_path.unlink()
+            if click_path is not None:
+                click_path.unlink()
         else:
             shutil.move(str(silent_path), str(out_path))
     else:
