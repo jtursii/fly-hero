@@ -173,22 +173,28 @@ def capture_visualization_frames(
     )
 
 
-def _diverging_colormap(values: np.ndarray) -> np.ndarray:
+RETINA_RESTING_GRAY = 76  # ~30% of 255; resting-state brightness for covered photoreceptor pixels
+
+
+def _diverging_colormap(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """values: [...] signed floats -> RGB uint8 [..., 3]. Positive -> white
     (scaled by magnitude), negative -> blue (scaled by magnitude), 0 ->
-    black. Scaled by the array's own max absolute value. Used both for the
-    signed retina current and (where it's always >=0, so only the white
-    branch is exercised) the raw sampled intensity."""
+    resting gray. `valid` marks pixels covered by a photoreceptor's
+    footprint; pixels outside it stay black regardless of `values`. Scaled
+    by the array's own max absolute value. Used both for the signed retina
+    current and (where it's always >=0, so only the positive branch is
+    exercised, ramping resting gray -> white) the raw sampled intensity."""
     scale = np.abs(values).max()
     scale = scale if scale > 1e-9 else 1.0
     norm = np.clip(values / scale, -1.0, 1.0)
-    mag = np.clip(np.abs(norm) * 255, 0, 255).astype(np.uint8)
+    t_pos = np.clip(norm, 0.0, 1.0)
+    t_neg = np.clip(-norm, 0.0, 1.0)
+    gray_channel = np.clip(RETINA_RESTING_GRAY + t_pos * (255 - RETINA_RESTING_GRAY) - t_neg * RETINA_RESTING_GRAY, 0, 255)
+    blue_channel = np.clip(RETINA_RESTING_GRAY + (t_pos + t_neg) * (255 - RETINA_RESTING_GRAY), 0, 255)
     rgb = np.zeros(values.shape + (3,), dtype=np.uint8)
-    pos, neg = norm > 0, norm < 0
-    rgb[pos, 0] = mag[pos]
-    rgb[pos, 1] = mag[pos]
-    rgb[pos, 2] = mag[pos]
-    rgb[neg, 2] = mag[neg]
+    rgb[..., 0] = np.where(valid, gray_channel, 0)
+    rgb[..., 1] = np.where(valid, gray_channel, 0)
+    rgb[..., 2] = np.where(valid, blue_channel, 0)
     return rgb
 
 
@@ -199,15 +205,19 @@ def _gray_to_rgb(gray: np.ndarray) -> np.ndarray:
 def _retina_panel(retina_signal: np.ndarray, photo_map: PhotoreceptorMap, frame_size: int) -> np.ndarray:
     """retina_signal: [n_photo] signed current or (always >=0) raw sampled
     intensity -- caller (main()) picks which via --retina-panel. Returns an
-    RGB [frame_size, frame_size, 3] panel: each photoreceptor's signed value
-    placed at its image position (0 elsewhere -> black background), rendered
-    with the diverging colormap."""
+    RGB [frame_size, frame_size, 3] panel: each photoreceptor's footprint is
+    drawn at resting gray (visible even with zero signal, so both eye
+    silhouettes always show), with signal placed at its image position on
+    top via the diverging colormap; pixels with no photoreceptor coverage
+    stay black."""
     rows_i = np.clip(np.nan_to_num(photo_map.image_pos[:, 0] * (frame_size - 1)), 0, frame_size - 1).astype(np.int64)
     cols_i = np.clip(np.nan_to_num(photo_map.image_pos[:, 1] * (frame_size - 1)), 0, frame_size - 1).astype(np.int64)
     valid = photo_map.included_mask & ~np.isnan(photo_map.image_pos[:, 0])
     grid = np.zeros((frame_size, frame_size), dtype=np.float64)
+    covered = np.zeros((frame_size, frame_size), dtype=bool)
     grid[rows_i[valid], cols_i[valid]] = retina_signal[valid]
-    return _diverging_colormap(grid)
+    covered[rows_i[valid], cols_i[valid]] = True
+    return _diverging_colormap(grid, covered)
 
 
 def zscore_activity_per_neuron(activity_frames: np.ndarray) -> np.ndarray:
