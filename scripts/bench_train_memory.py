@@ -200,6 +200,7 @@ def main() -> None:
         ("batch=8, no checkpoint", 8, False),
         ("batch=8, checkpoint", 8, True),
         ("batch=4, no checkpoint", 4, False),
+        ("batch=16, checkpoint", 16, True),
     ]
 
     rows = []
@@ -211,21 +212,28 @@ def main() -> None:
             rows.append(dict(label=label, batch=batch, checkpoint=ckpt, error=res["error"]))
             continue
         peak_ok = res["peak"] <= GATE_G3_MAX_PEAK_BYTES
-        print(f"  elapsed={res['elapsed']:.3f}s peak={_fmt_bytes(res['peak'])} (<=40GiB: {peak_ok})")
-        rows.append(dict(label=label, batch=batch, checkpoint=ckpt, **res, peak_ok=peak_ok))
+        samples_per_s = batch / res["elapsed"]
+        print(
+            f"  elapsed={res['elapsed']:.3f}s peak={_fmt_bytes(res['peak'])} "
+            f"samples/s={samples_per_s:.3f} (<=40GiB: {peak_ok})"
+        )
+        rows.append(dict(label=label, batch=batch, checkpoint=ckpt, **res, peak_ok=peak_ok, samples_per_s=samples_per_s))
 
-    print("\n| config | elapsed (s) | peak | <=40GiB |")
-    print("|---|---|---|---|")
+    print("\n| config | elapsed (s) | peak | samples/s | <=40GiB |")
+    print("|---|---|---|---|---|")
     for r in rows:
         if "error" in r:
-            print(f"| {r['label']} | ERROR | | |")
+            print(f"| {r['label']} | ERROR | | | |")
         else:
-            print(f"| {r['label']} | {r['elapsed']:.3f} | {_fmt_bytes(r['peak'])} | {r['peak_ok']} |")
+            print(f"| {r['label']} | {r['elapsed']:.3f} | {_fmt_bytes(r['peak'])} | {r['samples_per_s']:.3f} | {r['peak_ok']} |")
 
     ok_rows = [r for r in rows if "error" not in r and r["peak_ok"]]
     if ok_rows:
-        fastest = min(ok_rows, key=lambda r: r["elapsed"])
-        print(f"\nFastest config <=40GiB: {fastest['label']} ({fastest['elapsed']:.3f}s, {_fmt_bytes(fastest['peak'])})")
+        fastest = max(ok_rows, key=lambda r: r["samples_per_s"])
+        print(
+            f"\nHighest samples/sec <=40GiB: {fastest['label']} "
+            f"({fastest['samples_per_s']:.3f} samples/s, {fastest['elapsed']:.3f}s, {_fmt_bytes(fastest['peak'])})"
+        )
     else:
         print("\nNo config met the <=40GiB peak bound.")
 

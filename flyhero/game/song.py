@@ -146,6 +146,33 @@ def load_song_merged(path: Path, min_gap_s: float = 1.0 / 60.0) -> Song:
     return song
 
 
+def slice_song(song: Song, start_s: float, duration_s: float) -> Song:
+    """A new Song covering [start_s, start_s+duration_s) of `song`: notes
+    with time_s in that range, shifted so the slice starts at t=0 (matching
+    render_frame's/RuleEngine's assumption that a Song's own clock starts at
+    0). Used to build burn-in+gradient-window training clips and fixed
+    evaluation excerpts without re-simulating a whole song (PLAN Phase 3b).
+    A note within hit_window_s before start_s but not yet time_s>=start_s is
+    dropped, not partially included -- an accepted simplification for
+    training-time clips/diagnostics (Phase 4's evaluate.py scores whole
+    songs, not slices)."""
+    end_s = start_s + duration_s
+    mask = (song.notes["time_s"] >= start_s) & (song.notes["time_s"] < end_s)
+    sliced = song.notes[mask].copy()
+    sliced["time_s"] = sliced["time_s"] - start_s
+    return Song(
+        song_id=song.song_id,
+        title=song.title,
+        artist=song.artist,
+        charter=song.charter,
+        difficulty=song.difficulty,
+        notes=sliced,
+        duration_s=duration_s,
+        chart_offset_s=song.chart_offset_s,
+        ini_delay_s=song.ini_delay_s,
+    )
+
+
 def load_song(path: Path) -> Song:
     data: dict[str, Any] = np.load(path, allow_pickle=False)
     return Song(

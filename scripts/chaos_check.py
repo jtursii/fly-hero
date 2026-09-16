@@ -128,6 +128,17 @@ def check_reliability(
         traces.append(dn_trace)
 
     trace_a, trace_b = traces
+
+    # Bug check (user-requested): if the burn-in state weren't actually
+    # carried into the target window, frame 0's DN readout would be
+    # identical between the two runs (both would just be "brain freshly
+    # seeing the target song's first frame") -- max|delta DN| at frame 0
+    # must be nonzero, and should decay over the following frames as the
+    # burn-in-state difference washes out (see the module docstring's
+    # tau-based explanation for why the last-3s traces end up bit-identical).
+    n_first_60 = min(60, trace_a.shape[0])
+    per_frame_max_diff = (trace_a[:n_first_60] - trace_b[:n_first_60]).abs().max(dim=1).values.tolist()
+
     last_a = trace_a[-n_last_3s:].numpy()  # [n_last_3s, n_dn]
     last_b = trace_b[-n_last_3s:].numpy()
 
@@ -152,6 +163,7 @@ def check_reliability(
         median_corr=float(np.median(valid)) if len(valid) else float("nan"),
         max_abs_diff_trace_a_b=float(np.abs(last_a - last_b).max()),
         max_val_trace_a=float(np.abs(last_a).max()),
+        per_frame_max_diff_first_60=per_frame_max_diff,
     )
 
 
@@ -256,7 +268,20 @@ def main() -> None:
 
     print("\n=== (a) reliability ===")
     reliability = check_reliability(cfg_brain, cfg_game, graph, photo_map, target_song, burn_in_songs)
-    print(json.dumps(reliability, indent=2))
+    diffs = reliability["per_frame_max_diff_first_60"]
+    print(f"per-frame max|delta DN|, first {len(diffs)} frames of the target window:")
+    print("  " + ", ".join(f"{d:.4g}" for d in diffs))
+    if diffs[0] == 0.0:
+        raise RuntimeError(
+            "BUG CHECK FAILED: max|delta DN| at frame 0 is exactly 0 -- the burn-in state is not "
+            "being carried into the target window (both runs saw an identical fresh state), not a "
+            "real reliability result. Stopping per the user's explicit instruction."
+        )
+    decay_frame = next((i for i, d in enumerate(diffs) if d < 1e-6), None)
+    print(f"frame 0: {diffs[0]:.6g} (nonzero, as expected -- burn-in state is carried)")
+    print(f"decays below 1e-6 at frame: {decay_frame}")
+    reliability_summary = {k: v for k, v in reliability.items() if k != "per_frame_max_diff_first_60"}
+    print(json.dumps(reliability_summary, indent=2))
     reliability_ok = reliability["mean_corr_last_3s"] >= RELIABILITY_CORR_MIN
 
     print("\n=== (b) perturbation ===")
@@ -282,6 +307,9 @@ def main() -> None:
         f"Mean per-DN Pearson correlation over the last 3s: **{reliability['mean_corr_last_3s']:.4f}** "
         f"(threshold {RELIABILITY_CORR_MIN}, {reliability['n_dn']} DNs, "
         f"{reliability['frac_dn_constant']:.4f} fraction with near-zero variance in a run, excluded from the mean)\n\n"
+        f"Bug check: per-frame max\\|delta DN\\| at frame 0 = **{diffs[0]:.6g}** (nonzero -- burn-in "
+        f"state confirmed carried into the target window), decays below 1e-6 at frame **{decay_frame}**. "
+        f"First {len(diffs)} frames: {', '.join(f'{d:.4g}' for d in diffs)}\n\n"
         "## (b) Perturbation\n"
         f"Typical photoreceptor input magnitude (measured on {reliability['target_song']}): "
         f"{perturbation['typical_input_magnitude']:.6f}; noise std (1%): {perturbation['noise_std']:.6f}\n\n"

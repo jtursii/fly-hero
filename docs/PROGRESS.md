@@ -1,9 +1,12 @@
 # Progress
 
 ## Current phase
-Phase 3b — diagnostics complete (memory benchmark, chaos check), build plan
-(bc.py/baseline_gru.py/decoder.py/curriculum/resumability/logging) presented
-to the user for approval, not yet implemented. See the Log entry below.
+Phase 3b — in progress. Diagnostics done (memory benchmark D26, chaos check).
+Built: decoder.py, clip_sampler.py (note-aware sampling), baseline_gru.py,
+policy.py, train/bc.py, train/readout_only.py, scripts/status.sh update.
+GRU baseline gate **PASSED** (0.992 hit_rate on Medium val within 1h, see
+Log). Readout-only cache/fit in progress. Full-model smoke test and
+`bc_full_real` overnight launch not yet done.
 
 Phase 3a — **complete**. rate_model.py, readout.py, D16 hybrid gain grouping,
 torch retina port, bench/bench_brain.py, and the gain0 stability sweep are
