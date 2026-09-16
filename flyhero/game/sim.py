@@ -203,32 +203,77 @@ def render_debug_video(
     return metrics
 
 
-AUDIO_FILENAMES = ("song.mp3", "song.ogg", "song.opus", "song.wav")
+AUDIO_EXTENSIONS = (".mp3", ".ogg", ".opus", ".wav")
+# "preview" is a short promotional clip for the song-select screen (usually
+# a ~30s excerpt already contained in the other stems, per song.ini's
+# preview_start_time), not an instrument/mix stem -- mixing it in would
+# layer a duplicate/looping snippet over the real audio. Excluded from both
+# --audio-mix modes.
+NON_STEM_NAMES = {"preview"}
 
 
-def find_song_audio(folder: Path) -> Path | None:
-    for name in AUDIO_FILENAMES:
-        p = folder / name
-        if p.exists():
+def list_song_audio_files(folder: Path) -> list[Path]:
+    return sorted(
+        p
+        for p in folder.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in AUDIO_EXTENSIONS
+        and p.stem.lower() not in NON_STEM_NAMES
+    )
+
+
+def _find_stem(audio_files: list[Path], stem_name: str) -> Path | None:
+    for p in audio_files:
+        if p.stem.lower() == stem_name.lower():
             return p
     return None
 
 
+def select_audio_stems(folder: Path, mix: str) -> list[Path]:
+    """mix="guitar" (default): the guitar stem only, matched by filename
+    stem "guitar" case-insensitively across AUDIO_EXTENSIONS (e.g.
+    guitar.mp3). If no guitar stem exists, falls back to the "song" stem
+    (the pre-mixed backing track) and prints a warning naming it -- never
+    silently substitutes some other stem (rhythm, bass, ...).
+    mix="full": every audio stem present in the folder (guitar, rhythm,
+    bass, drums, song, vocals, crowd, whatever exists), mixed at equal
+    volume by the caller."""
+    audio_files = list_song_audio_files(folder)
+    if not audio_files:
+        return []
+    if mix == "full":
+        return audio_files
+
+    guitar = _find_stem(audio_files, "guitar")
+    if guitar is not None:
+        return [guitar]
+    song = _find_stem(audio_files, "song")
+    if song is not None:
+        print(f"WARNING: no guitar stem found in {folder}; falling back to {song.name}")
+        return [song]
+    raise FileNotFoundError(
+        f"no guitar or song audio stem found in {folder} "
+        f"(found: {[p.name for p in audio_files]})"
+    )
+
+
 def mux_audio_into_video(
-    video_path: Path, audio_path: Path, audio_start_offset_s: float, out_path: Path
+    video_path: Path, audio_paths: list[Path], audio_start_offset_s: float, out_path: Path
 ) -> None:
-    """Mux `audio_path` into `video_path`'s silent track. Per D22, this only
-    ever writes under a gitignored path (e.g. media/) -- it copies audio out
-    of the (still read-only) song library, never into it, and never into
-    web/.
+    """Mux `audio_paths` into `video_path`'s silent track -- one stem plays
+    as-is, more than one are mixed at equal volume (ffmpeg's `amix`). Per
+    D22, this only ever writes under a gitignored path (e.g. media/) -- it
+    copies audio out of the (still read-only) song library, never into it,
+    and never into web/.
 
     Sync convention: chart Offset / song.ini delay both describe how far the
     chart's note timeline is shifted relative to the raw audio (positive =
-    notes pushed later relative to the audio); to sync, the audio must start
-    playing `-(chart_offset_s + ini_delay_s)` seconds into the video
+    notes pushed later relative to the audio); to sync, every stem must
+    start playing `-(chart_offset_s + ini_delay_s)` seconds into the video
     timeline -- negative means the audio starts before video t=0, handled by
-    trimming that much off the front of the audio file instead of shifting
-    video frames (which can't start before 0)."""
+    trimming that much off the front of each stem instead of shifting video
+    frames (which can't start before 0). The same offset is applied to every
+    stem identically."""
     import subprocess
 
     import imageio_ffmpeg
@@ -237,19 +282,23 @@ def mux_audio_into_video(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if audio_start_offset_s >= 0:
-        audio_input_args = ["-itsoffset", f"{audio_start_offset_s:.6f}", "-i", str(audio_path)]
+        offset_args = ["-itsoffset", f"{audio_start_offset_s:.6f}"]
     else:
-        audio_input_args = ["-ss", f"{-audio_start_offset_s:.6f}", "-i", str(audio_path)]
+        offset_args = ["-ss", f"{-audio_start_offset_s:.6f}"]
 
-    cmd = [
-        ffmpeg_exe, "-y",
-        "-i", str(video_path),
-        *audio_input_args,
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
-        str(out_path),
-    ]
+    cmd = [ffmpeg_exe, "-y", "-i", str(video_path)]
+    for p in audio_paths:
+        cmd += offset_args + ["-i", str(p)]
+
+    n = len(audio_paths)
+    if n == 1:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        inputs = "".join(f"[{i + 1}:a]" for i in range(n))
+        filter_complex = f"{inputs}amix=inputs={n}:duration=longest:dropout_transition=0[aout]"
+        cmd += ["-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[aout]"]
+
+    cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(out_path)]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
@@ -263,6 +312,12 @@ def main() -> int:
         "--mux-audio-from",
         default=None,
         help="song folder rel_path (relative to song_library) to find audio in and mux into --out",
+    )
+    parser.add_argument(
+        "--audio-mix",
+        choices=["guitar", "full"],
+        default="guitar",
+        help="guitar (default): guitar stem only. full: every stem in the folder, mixed equally.",
     )
     args = parser.parse_args()
 
@@ -289,13 +344,17 @@ def main() -> int:
         if args.mux_audio_from:
             paths_cfg = load_config(args.paths_config)
             song_root = Path(paths_cfg["song_library"]).expanduser() / args.mux_audio_from
-            audio_path = find_song_audio(song_root)
-            if audio_path is None:
-                parser.error(f"no audio file found under {song_root}")
+            try:
+                audio_paths = select_audio_stems(song_root, args.audio_mix)
+            except FileNotFoundError as e:
+                parser.error(str(e))
+            if not audio_paths:
+                parser.error(f"no audio files found under {song_root}")
             offset_s = -(song.chart_offset_s + song.ini_delay_s)
-            mux_audio_into_video(video_path, audio_path, offset_s, out_path)
+            mux_audio_into_video(video_path, audio_paths, offset_s, out_path)
             video_path.unlink()
-            print(f"Muxed audio from {audio_path} (offset {offset_s:+.3f}s)")
+            stems_str = ", ".join(str(p) for p in audio_paths)
+            print(f"Audio stems used ({args.audio_mix} mix, offset {offset_s:+.3f}s): {stems_str}")
 
         print(f"Wrote {out_path}")
         print(metrics)
