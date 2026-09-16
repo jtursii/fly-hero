@@ -112,7 +112,7 @@ def run_clip(
             obs, _, _, _ = env.step(np.zeros((batch, 6), dtype=bool))
             frame_t = torch.from_numpy(obs["frame"]).to(device)
             state, _ = policy.step_frame(state, frame_t)
-            max_abs_state = max(max_abs_state, float(state.abs().max().item()))
+            cur = float(state.abs().max().item()); max_abs_state = cur if (cur != cur or cur > max_abs_state) else max_abs_state
     # state is already un-tracked (built under no_grad) -- passed into the
     # gradient window as a plain numeric starting point, like i_photo. We
     # never need gradients w.r.t. this specific carried-over value, only
@@ -131,7 +131,7 @@ def run_clip(
             else:
                 state, logits = policy.step_frame(state, frame_t)
             logits_list.append(logits)
-            max_abs_state = max(max_abs_state, float(state.detach().abs().max().item()))
+            cur = float(state.detach().abs().max().item()); max_abs_state = cur if (cur != cur or cur > max_abs_state) else max_abs_state
     logits_stack = torch.stack(logits_list, dim=1)  # [B, T, 6]
     return state, logits_stack, max_abs_state
 
@@ -311,16 +311,37 @@ def main() -> None:
         )
         loss = fret_loss + strum_loss
 
-        is_nan = bool(torch.isnan(loss).item())
-        if not is_nan:
+        # The loss itself is essentially never NaN (BCEWithLogitsLoss is
+        # numerically stable for the logit magnitudes this model produces);
+        # the real risk is in backward(): a handful of neuron types in the
+        # early visual pathway (found via a real-run investigation: R7, R8,
+        # L1, L5, plus one 2-neuron type) can produce NaN gradients from
+        # backprop through the 180-substep burn-in+window unroll at this
+        # gain0, even though their forward-pass activations stay finite and
+        # bounded (max|v|~10-11, never inf/nan) -- a gradient-explosion-
+        # through-time effect, not a forward-pass bug. clip_grad_norm_'s
+        # total-norm computation then propagates that NaN into literally
+        # every parameter's gradient (since norm = sqrt(sum of squares)
+        # over ALL params), so checking the returned norm catches it exactly
+        # -- but only if checked *before* optimizer.step(), which an earlier
+        # version of this loop failed to do (it only checked the pre-
+        # backward loss value, so NaN gradients were silently applied,
+        # permanently corrupting the model's Adam state from that step on).
+        is_nan_loss = bool(torch.isnan(loss).item())
+        if not is_nan_loss:
             optimizer.zero_grad()
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(policy.readout_parameters()) + list(policy.non_readout_parameters()), cfg_bc["grad_clip_norm"],
             )
-            optimizer.step()
+            is_nan = bool(torch.isnan(grad_norm).item()) or bool(torch.isinf(grad_norm).item())
+            if not is_nan:
+                optimizer.step()
+            optimizer.zero_grad()  # drop the (possibly NaN) grads either way before the next step
         else:
+            is_nan = True
             grad_norm = torch.tensor(float("nan"))
+        if is_nan:
             nan_steps += 1
 
         step_dt = time.time() - t0
@@ -331,9 +352,10 @@ def main() -> None:
         if step % 10 == 0:
             steps_per_s = len(step_times) / sum(step_times) if step_times else 0.0
             record = dict(
-                step=step, difficulty=difficulties[difficulty_idx], loss=float(loss.item()) if not is_nan else float("nan"),
-                fret_loss=float(fret_loss.item()) if not is_nan else float("nan"),
-                strum_loss=float(strum_loss.item()) if not is_nan else float("nan"),
+                step=step, difficulty=difficulties[difficulty_idx],
+                loss=float(loss.item()) if not is_nan_loss else float("nan"),
+                fret_loss=float(fret_loss.item()) if not is_nan_loss else float("nan"),
+                strum_loss=float(strum_loss.item()) if not is_nan_loss else float("nan"),
                 grad_norm=float(grad_norm.item()), max_abs_state=max_abs_state,
                 nan_frac=nan_steps / window_steps, steps_per_s=steps_per_s, pos_weight=pos_weight,
             )
