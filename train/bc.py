@@ -42,11 +42,13 @@ from flyhero.utils.run import make_run_dir
 from train.common import build_eval_clip, build_val_set, estimate_strum_pos_weight, make_training_clip
 
 _stop_requested = False
+_stop_signal_name: str | None = None
 
 
-def _handle_sigterm(signum, frame) -> None:
-    global _stop_requested
+def _handle_stop_signal(signum, frame) -> None:
+    global _stop_requested, _stop_signal_name
     _stop_requested = True
+    _stop_signal_name = signal.Signals(signum).name
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,14 +58,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--brain-config", default="configs/brain.yaml")
     p.add_argument("--model", choices=["connectome", "gru"], default="connectome")
     p.add_argument("--run-name", default=None)
-    p.add_argument("--resume", default=None)
+    p.add_argument(
+        "--resume", default=None,
+        help="a checkpoint file path, or the literal 'latest' combined with --run-dir to resolve "
+        "<run-dir>/checkpoint_latest.pt",
+    )
+    p.add_argument("--run-dir", default=None, help="required when --resume latest is used")
     p.add_argument("--device", default="mps")
     p.add_argument("--dtype", default="float32")
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--max-time-s", type=float, default=None)
     p.add_argument("--fixed-difficulty", default=None, help="disable curriculum, train/eval only this difficulty")
     p.add_argument("--gradient-checkpointing", action="store_true", default=None)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.resume == "latest":
+        if not args.run_dir:
+            p.error("--resume latest requires --run-dir <path>")
+        args.resume = str(Path(args.run_dir) / "checkpoint_latest.pt")
+    return args
 
 
 def build_policy(model_kind: str, cfg_bc: dict, cfg_game: dict, cfg_brain: dict, photo_map, device, dtype):
@@ -136,29 +148,49 @@ def run_clip(
     return state, logits_stack, max_abs_state
 
 
+def score_eval_entry(
+    policy, env: VecRhythmEnv, entry, burn_in_s: float, fps: int, hit_window_s: float, device, dtype,
+) -> dict:
+    """Runs one val entry (burn-in + its fixed excerpt) through the policy
+    and scores it -- the single source of truth for "what is this
+    checkpoint's hit_rate on this song excerpt", used by both
+    evaluate_difficulty (aggregate eval, below) and scripts/
+    render_gameplay_video.py (so a rendered clip's hit_rate is
+    *structurally* guaranteed to match eval's number for the same
+    checkpoint/song/excerpt, not just carefully kept in sync by hand).
+    Returns metrics plus the raw probs/frets/strum/excerpt_notes/clip/
+    burn_in_actual a caller can use for rendering."""
+    clip, burn_in_actual = build_eval_clip(entry, burn_in_s)
+    burn_in_frames = round(burn_in_actual * fps)
+    excerpt_frames = round(entry.excerpt_s * fps)
+    _, logits_stack, _ = run_clip(
+        policy, env, [clip], burn_in_frames, excerpt_frames, device, dtype,
+        with_grad=False, gradient_checkpointing=False,
+    )
+    probs = torch.sigmoid(logits_stack[0]).cpu().numpy()  # [T, 6]
+    frets, strum = decode_trace(probs)
+    held_mask = frets_to_held_mask(frets)
+
+    # score against the notes actually inside the excerpt window
+    # (frame-index-aligned with the excerpt, not the burn-in prefix).
+    excerpt_notes = clip.notes[clip.notes["time_s"] >= burn_in_actual].copy()
+    excerpt_notes["time_s"] -= burn_in_actual
+    metrics, events = score_playthrough(excerpt_notes, held_mask, strum, fps, hit_window_s)
+    return dict(
+        metrics=metrics, events=events, probs=probs, frets=frets, strum=strum, held_mask=held_mask,
+        excerpt_notes=excerpt_notes, clip=clip, burn_in_actual=burn_in_actual,
+        burn_in_frames=burn_in_frames, excerpt_frames=excerpt_frames,
+    )
+
+
 def evaluate_difficulty(
     policy, env: VecRhythmEnv, val_entries, burn_in_s: float, fps: int, hit_window_s: float, device, dtype,
 ) -> dict:
     hit_rates, overstrums = [], []
     for entry in val_entries:
-        clip, burn_in_actual = build_eval_clip(entry, burn_in_s)
-        burn_in_frames = round(burn_in_actual * fps)
-        excerpt_frames = round(entry.excerpt_s * fps)
-        _, logits_stack, _ = run_clip(
-            policy, env, [clip], burn_in_frames, excerpt_frames, device, dtype,
-            with_grad=False, gradient_checkpointing=False,
-        )
-        probs = torch.sigmoid(logits_stack[0]).cpu().numpy()  # [T, 6]
-        frets, strum = decode_trace(probs)
-        held_mask = frets_to_held_mask(frets)
-
-        # score against the notes actually inside the excerpt window
-        # (frame-index-aligned with the excerpt, not the burn-in prefix).
-        excerpt_notes = clip.notes[clip.notes["time_s"] >= burn_in_actual].copy()
-        excerpt_notes["time_s"] -= burn_in_actual
-        metrics, _ = score_playthrough(excerpt_notes, held_mask, strum, fps, hit_window_s)
-        hit_rates.append(metrics["hit_rate"])
-        overstrums.append(metrics["overstrums_per_min"])
+        result = score_eval_entry(policy, env, entry, burn_in_s, fps, hit_window_s, device, dtype)
+        hit_rates.append(result["metrics"]["hit_rate"])
+        overstrums.append(result["metrics"]["overstrums_per_min"])
     return dict(
         hit_rate=float(np.mean(hit_rates)) if hit_rates else 0.0,
         overstrums_per_min=float(np.mean(overstrums)) if overstrums else 0.0,
@@ -174,7 +206,8 @@ def main() -> None:
 
     device = torch.device(args.device if (args.device != "mps" or torch.backends.mps.is_available()) else "cpu")
     dtype = getattr(torch, args.dtype)
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+    signal.signal(signal.SIGINT, _handle_stop_signal)  # Ctrl+C behaves identically to SIGTERM: checkpoint, then exit
 
     seed = cfg_bc["seed"]
     rng = np.random.default_rng(seed)
@@ -283,7 +316,7 @@ def main() -> None:
         if args.max_time_s is not None and (time.time() - start_time) >= args.max_time_s:
             break
         if _stop_requested:
-            do_checkpoint("sigterm")
+            do_checkpoint(_stop_signal_name or "stop_signal")
             break
 
         t0 = time.time()

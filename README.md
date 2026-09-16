@@ -60,6 +60,19 @@ PYTHONPATH=. uv run python -m flyhero.game.sim \
 
 `--audio-mix guitar` picks the `guitar.*` stem by filename (falling back to `song.*` with a printed warning if no guitar stem exists — never a silent substitution of some other stem). Rendered videos are written under `media/` or `runs/`, both gitignored — audio is never committed and never placed under `web/` (D22).
 
+## Training controls (`fly.sh`)
+
+```
+./fly.sh check    # is it running + progress + last 5 evals + checkpoint age
+./fly.sh awake    # keep the Mac awake while training (leave the window open)
+./fly.sh stop     # SIGTERM the training process, waits for a clean checkpoint
+./fly.sh resume   # resume from the latest checkpoint (refuses if already running)
+./fly.sh video [song] [difficulty]   # render a gameplay video at the current checkpoint's skill
+./fly.sh log      # tail the resume log
+```
+
+`RUN` defaults to the newest `runs/*bc_full_real*` directory; override with `RUN=path ./fly.sh ...`. `video` with no song picks the first fixed eval song at the checkpoint's current curriculum difficulty (same 60s excerpt `bc.py`'s own eval scores — the printed `hit_rate` matches it exactly); an explicit song name is fuzzy-matched against val/test songs (`--allow-train` to include train-split songs), and lists matches if ambiguous. Add `--device cpu` if rendering is slow, `--audio guitar` for the guitar stem only (default: every stem mixed), `--ckpt <path>` to pick a specific checkpoint instead of the latest. Output goes to `media/videos/` (gitignored).
+
 ## Repo layout
 
 ```

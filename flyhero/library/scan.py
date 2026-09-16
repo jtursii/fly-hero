@@ -18,6 +18,7 @@ guitar-part section headers / track names (still no full note parsing).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import re
@@ -566,6 +567,32 @@ def main() -> int:
     print(f"Report written to {report_path}")
 
     return 1 if cloud["cloud_only_suspected"] else 0
+
+
+def build_song_id_index(library_root: Path, cache_path: Path) -> dict[str, str]:
+    """{song_id: rel_path} for every song folder under library_root --
+    song_id (song.py::compute_song_id) is a one-way hash of rel_path, and
+    Phase 2's ingest never persisted a reverse lookup (rel_path isn't stored
+    per-song, by design -- see D17), so anything that needs the real
+    filesystem path back from a song_id (e.g. to find its audio files)
+    rebuilds this index by walking the library once and caches it to
+    `cache_path` (a data/processed/ artifact, gitignored, read-only w.r.t.
+    the library itself -- invariant 8)."""
+    if cache_path.exists():
+        return json.loads(cache_path.read_text())
+
+    from flyhero.game.song import compute_song_id
+
+    scan = find_song_folders(library_root)
+    index = {compute_song_id(sf.rel_path): sf.rel_path for sf in scan.songs}
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(index))
+    return index
+
+
+def find_song_folder_by_id(library_root: Path, cache_path: Path, song_id: str) -> Path | None:
+    rel_path = build_song_id_index(library_root, cache_path).get(song_id)
+    return (library_root / rel_path) if rel_path else None
 
 
 if __name__ == "__main__":

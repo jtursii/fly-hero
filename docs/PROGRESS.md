@@ -1,16 +1,28 @@
 # Progress
 
 ## Current phase
-Phase 3b — **all of today's planned steps done**. GRU baseline gate PASSED.
-Readout-only control complete (frozen-brain baseline established, never
-advances past Easy -- expected). Full-model NaN-gradient issue found,
-fixed (NaN-safe gradient sanitization, user-chosen), and re-verified stable
-(loss falling, no crash, max|v| bounded). `bc_full_real` **launched
-overnight** in the background:
+Phase 3b — training in progress, plus operational tooling built alongside
+it. GRU baseline gate PASSED. Readout-only control complete (frozen-brain
+baseline established, never advances past Easy -- expected). Full-model
+NaN-gradient issue found, fixed (NaN-safe gradient sanitization,
+user-chosen), and re-verified stable. `bc_full_real` **running overnight**
+in the background (never stopped or modified while the tooling below was
+built and verified against it read-only / via short separate GRU runs):
 
 - Run dir: `runs/20260916_123616_bc_full_real`
-- Status: `scripts/status.sh runs/20260916_123616_bc_full_real`
+- Status: `scripts/status.sh runs/20260916_123616_bc_full_real` or `./fly.sh check`
 - Log: `runs/bc_full_real_launch.log`
+
+**Resume + operational tooling done** (verified with real runs, not just
+code review; see the Log entry below): `--resume latest --run-dir <path>`,
+SIGINT parity with SIGTERM, a checkpoint round-trip test, `fly.sh`
+(check/stop/resume/video/log, takeover of the previously untracked
+hand-written version), and `fly.sh video` (gameplay-video rendering through
+the exact eval inference path, with a test proving its hit_rate matches
+eval's). **NaN diagnosis (offline, checkpoint-copy root-cause analysis of
+the gradient-explosion mechanism) deferred** -- not started this session;
+checkpoint copies for steps 1000/5000/latest are staged in the scratchpad,
+ready to resume from when picked back up.
 
 Phase 3a — **complete**. rate_model.py, readout.py, D16 hybrid gain grouping,
 torch retina port, bench/bench_brain.py, and the gain0 stability sweep are
@@ -41,6 +53,12 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
 
 ## Log
 <!-- newest first: date — task — outcome — deviations — repro command -->
+- 2026-09-16 — **Resume verification + `fly.sh`/`fly.sh video` operational tooling (`bc_full_real` untouched throughout)** —
+  - **Resume, verified with real runs, not just code**: `train/bc.py` gained `--resume latest --run-dir <path>` (previously `--resume` needed an exact checkpoint filename, unworkable for a script that doesn't know the latest step number) and SIGINT handling (previously SIGTERM-only; both now checkpoint-then-exit identically, and the checkpoint's `reason` field records which signal actually fired -- was hardcoded to say "sigterm" even under SIGINT). Verified end to end on the GRU baseline: ran 2 min, SIGINT (checkpoint saved, step 298), resumed 1 min via `--resume latest --run-dir` -- step count continued (298->553) with no loss jump, `pos_weight`/curriculum state/Adam moment buffers/both RNG streams all restored, confirmed the resumed process continues writing into the *same* run dir (no new timestamped dir). Added `tests/test_bc.py::test_checkpoint_round_trip_restores_full_training_state` (model weights, Adam's per-param `exp_avg`/`exp_avg_sq`/step counts -- not just LR config -- and numpy+torch RNG streams all round-trip exactly). **Verified resume command for `bc_full_real`**: `uv run python -m train.bc --model connectome --run-name bc_full_real --resume latest --run-dir runs/20260916_123616_bc_full_real`.
+  - **`fly.sh` taken over** (was untracked, hand-written, at the repo root): rewrote `check` (now also shows the last 5 eval lines and checkpoint age), `stop`, `resume`; added `video`. Fixed two real bugs found while testing against a live-ish process: `RUN` was a hardcoded timestamp (broke on any new run) rather than "the newest `runs/*bc_full_real*` dir," and `resume_cmd()` built `--run-name` from the *timestamped* run-dir name instead of the plain name `find_pid()`'s process-matching regex actually expects -- `fly.sh resume` reported "failed to start" even when the process had started correctly, because it could never find its own pid afterward. Verified `check`/`stop`/`resume` (including "refuse if already running") against a real training process; confirmed the process-detection pattern can't match `fly.sh video`'s invocation (a different module path entirely, never containing `train.bc`).
+  - **`fly.sh video` / `scripts/render_gameplay_video.py`** (new): renders a gameplay video at a checkpoint's current skill. Inference reuses `train.bc.score_eval_entry`, refactored out of `evaluate_difficulty` specifically so both call sites are the *same* code (invariants 1 and 4: retina -> brain/GRU -> readout -> decoder -> rules.py, no_grad) -- guaranteeing the rendered clip's `hit_rate` matches eval's for that checkpoint/song/excerpt by construction, not by careful hand-syncing. Song/difficulty: default is the first fixed eval song at the checkpoint's current curriculum difficulty (same 60s excerpt eval scores); an explicit name is fuzzy-matched against val+test (`flyhero/game/song_search.py`), train-split songs refused unless `--allow-train`, ambiguous queries list all matches. Reverse song_id->folder lookup needed for audio (Phase 2 never persisted `rel_path` per song, per D17) via a new cached library index (`flyhero/library/scan.py::build_song_id_index`). Audio muxing reuses `sim.py`'s existing stem-selection/offset logic, generalized (`_excerpt_audio_offset_s`) to an excerpt that doesn't start at song time 0. Ran end to end for real (CPU, a real GRU checkpoint): valid h264+aac MP4 output, printed `hit_rate` matched eval, ambiguous-query listing and `--allow-train` refusal both confirmed. Added `tests/test_render_gameplay_video.py::test_rendered_clip_hit_rate_matches_eval_hit_rate`.
+  - **NaN diagnosis (offline root-cause analysis) deferred**, not started this session -- checkpoint copies for steps 1000/5000/latest were staged (from `bc_full_real`, read-only `cp`, never touching the live files) but the analysis itself wasn't run. Picking this up later needs: re-copy fresh checkpoints (the staged copies were scratchpad-local, not committed), then per-checkpoint single-clip forward+backward on CPU inspecting `tau`/`bias`/`g` gradients for non-finite entries, float32 vs float64 reproduction, and per-substep gradient-norm growth (via `retain_grad()` on each of the 240 unrolled `v` tensors).
+  - Repro: `PYTHONPATH=. uv run python -m train.bc --model gru --fixed-difficulty Medium --run-name resume_verify_gru` then SIGINT after ~2min, then `--resume latest --run-dir runs/<that dir>`; `PYTHONPATH=. uv run pytest -q tests/test_bc.py tests/test_render_gameplay_video.py`; `./fly.sh check` / `./fly.sh video --device cpu` against `runs/20260916_155821_resume_verify_gru`.
 - 2026-09-16 — **Phase 3b execution: NaN-safe gradient sanitization applied, GRU baseline + readout-only complete, `bc_full_real` launched overnight** —
   - **NaN remediation chosen and implemented** (user decision, presented with 3 options -- see the smoke-test log entry below for the finding): NaN-safe gradient sanitization. `train/bc.py`'s training step now zeros any non-finite entries in each parameter's gradient (`torch.nan_to_num`, `nan/posinf/neginf -> 0.0`) right after `backward()`, before `clip_grad_norm_` and `optimizer.step()` -- every step now applies a real update to the ~9,023 unaffected cell types; the step is no longer skipped outright. `nan_frac` in the logged metrics changed meaning accordingly: it now reports the fraction of steps that needed *some* sanitization (informational), not the fraction of steps skipped (there are none now, short of the loss itself being NaN, which has never been observed).
   - **Re-verified real training progress**: a fresh full-model smoke test (`--model connectome`, curriculum from Easy) ran 70 steps (~2 min, stopped early once the trend was unambiguous, to free the MPS device for `readout_only`'s concurrent val-trace caching rather than run the full 10 minutes for its own sake) -- loss fell **2.1 -> 1.5** (fret_loss 0.39->0.32, strum_loss noisy but trending down), `grad_norm` finite every step (2.7-14.5 range, pre-clip), `max|v|` stayed bounded (~11.3-11.5) throughout, zero crashes. Checkpointed cleanly on SIGTERM. Confirms the sanitization fix produces real, stable training, not just an absence of crashes.
@@ -166,6 +184,7 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
   - Repro: `uv run pytest -q`; `uv run python -m flyhero.library.scan --config configs/paths.yaml` → `docs/library_report.md`.
 
 ## Open issues
+- **Offline NaN root-cause diagnosis not done** (per-checkpoint forward+backward gradient inspection, float32 vs float64, per-substep growth) -- deferred this session; the sanitization workaround (D28) is in place and `bc_full_real` is training under it, but the underlying mechanism for *why* R7/R8/L1/L5's gradients explode isn't characterized yet. Not blocking (sanitization already lets training proceed), but should inform whether truncated BPTT or re-opening D25 is worth doing later.
 - ~~STOPPED (invariant 7): 100% gradient-NaN rate training the real connectome brain~~ -- **Resolved**: user chose NaN-safe gradient sanitization (zero NaN/Inf grad entries after `backward()`, before clipping, so unaffected cell types still update every step). Re-verified with a fresh smoke test: loss fell 2.1->1.5 over 70 steps, `grad_norm` finite, `max|v|` stayed bounded (~11.4-11.5), no crash. `bc_full_real` launched. The ~5 affected cell types (R7, R8, L1, L5, one 2-neuron type) will never receive a real gradient under this fix and stay near their initial `tau`/`bias`/`g` values -- worth reviewing in `docs/results.md` (Phase 5) whether that measurably limits final performance; truncated-BPTT and re-opening D25's gain0/bias_init choice remain on the table as follow-ups if so.
 - ~~Phase 3b memory-config decision not yet written~~ -- **Resolved**: D26 (batch=4, no checkpointing), written to `configs/bc.yaml` and `docs/DECISIONS.md`. Includes a batch=16 recheck the user requested; batch=4 remained the highest-samples/sec config <=40GiB.
 - Chaos check's perturbation divergence (3.9% at 3s) has no numeric gate from the user -- flagged as an ambiguity for the Phase 3b build plan rather than assumed pass/fail.
