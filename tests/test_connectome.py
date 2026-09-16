@@ -6,6 +6,8 @@ so these run fast and don't depend on the ~900 MB Zenodo/GitHub sources.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import pytest
@@ -14,6 +16,7 @@ from flyhero.connectome.build_graph import assign_neuron_nt, assign_type_id, bui
 from flyhero.connectome.shuffle import degree_preserving_shuffle
 
 ROOT_IDS = [1, 2, 3, 4, 5, 6]
+REAL_GRAPH_PATH = Path("data/processed/graph.npz")
 
 
 def _write_fixtures(tmp_path):
@@ -160,6 +163,12 @@ def test_build_graph_index_round_trip(tmp_path):
     np.testing.assert_allclose(graph["pos_voxel"][idx_2], [200.0, 20.0, 2.0])
     assert graph["pos_source_id"][idx_2] == 0  # soma
     assert meta["pos_source_counts_photoreceptor"] == {"soma": 1, "anchor": 1, "none": 0}
+
+    # No neuron should ever be left with a NaN position: every node has
+    # either a soma or an anchor point (D15/D16 follow-up bug fix).
+    assert not np.isnan(graph["pos_voxel"]).any()
+    assert not np.isnan(graph["pos_nm"]).any()
+    assert not (graph["pos_source_id"] == 2).any()  # 2 = "none"
     assert meta["photoreceptor_side_counts"] == {"R1-6_left": 1, "R7_right": 1}
 
 
@@ -259,3 +268,32 @@ def test_shuffle_actually_changes_targets():
     shuffled_post = degree_preserving_shuffle(pre, post, rng, n_swaps_factor=20)
 
     assert not np.array_equal(post, shuffled_post)
+
+
+@pytest.mark.skipif(
+    not REAL_GRAPH_PATH.exists(),
+    reason="requires the real graph.npz built from the downloaded FlyWire v783 data",
+)
+def test_real_graph_has_no_nan_positions():
+    """No node in the real connectome graph should be left without a
+    resolvable position, and photoreceptors without an in-volume soma must
+    have fallen back to the anchor point rather than gone unresolved."""
+    graph = np.load(REAL_GRAPH_PATH)
+
+    assert not np.isnan(graph["pos_voxel"]).any()
+    assert not np.isnan(graph["pos_nm"]).any()
+    assert not (graph["pos_source_id"] == 2).any()  # 2 = "none"
+
+    photo_idx = graph["input_idx_photoreceptor"]
+    photo_source = graph["pos_source_id"][photo_idx]
+    n_soma = int((photo_source == 0).sum())
+    n_anchor = int((photo_source == 1).sum())
+
+    # The vast majority of photoreceptors have no soma inside the FAFB
+    # volume (the retina sits outside it) and must use the pos_x/y/z anchor;
+    # a small minority do have a proofread in-volume soma. Both groups must
+    # actually be populated (not NaN) and not "none".
+    assert n_soma + n_anchor == len(photo_idx)
+    assert n_anchor > n_soma  # anchor-fallback dominates, as expected
+    assert n_soma > 0  # a handful of real in-volume photoreceptor somata exist
+    assert not np.isnan(graph["pos_voxel"][photo_idx]).any()
