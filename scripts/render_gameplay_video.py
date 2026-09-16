@@ -173,7 +173,7 @@ def capture_visualization_frames(
     )
 
 
-RETINA_RESTING_GRAY = 76  # ~30% of 255; resting-state brightness for covered photoreceptor pixels
+RETINA_RESTING_GRAY = 20  # matches the fret-bar panel's base gray
 
 
 def _diverging_colormap(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
