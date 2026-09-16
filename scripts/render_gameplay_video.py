@@ -6,9 +6,14 @@ checkpoint/song/excerpt (train.bc.score_eval_entry is the single shared
 implementation both call -- see its docstring).
 
 Panels (2x2 grid): highway with the model's own frets/strums + hit/miss/
-overstrum markers; fret targets vs. the model's actions; retina input at
-each photoreceptor's image position; a DN-activity (or GRU hidden-state)
-raster. A text overlay bar shows run/step/difficulty/song/live hit count.
+overstrum markers; fret targets vs. the model's actions (legend drawn in
+that panel's quadrant); retina input at each photoreceptor's image position
+(--retina-panel current|raw: signed adaptation-filtered current, a diverging
+colormap -- white=positive, blue=negative, black=zero -- or the raw sampled
+intensity before that filter, same colormap since it's always >=0); a
+DN-activity (or GRU hidden-state) raster, z-scored per neuron over the whole
+clip. A text overlay bar shows run/step/difficulty/song/live hits/accuracy/
+overstrums.
 
 Song/difficulty selection: default is the first of the fixed eval songs
 (train.common.build_val_set) at the checkpoint's current curriculum
@@ -54,6 +59,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt", default=None, help="override checkpoint path (default: <run>/checkpoint_latest.pt)")
     p.add_argument("--allow-train", action="store_true")
     p.add_argument("--audio", choices=["full", "guitar"], default="full")
+    p.add_argument(
+        "--retina-panel", choices=["current", "raw"], default="current",
+        help="current: signed adaptation-filtered current fed to the brain (default). "
+        "raw: sampled intensity before the EMA adaptation filter.",
+    )
     p.add_argument("--device", default="mps")
     p.add_argument("--out", default=None)
     return p.parse_args()
@@ -114,7 +124,7 @@ def capture_visualization_frames(
     policy.reset_stream(batch)
     state = policy.init_state(batch, device, dtype)
 
-    highway_frames, retina_frames, activity_frames = [], [], []
+    highway_frames, retina_frames, retina_raw_frames, activity_frames = [], [], [], []
     total_frames = burn_in_frames + excerpt_frames
     with torch.no_grad():
         for f in range(total_frames):
@@ -126,6 +136,7 @@ def capture_visualization_frames(
                 state, dn_rate_mean = policy.brain.frame_step(state, i_photo, n_substeps=policy.substeps_per_frame)
                 if f >= burn_in_frames:
                     retina_frames.append(i_photo[0].cpu().numpy())
+                    retina_raw_frames.append(policy.retina.last_intensity[0].cpu().numpy())
                     r_dn = torch.clamp(torch.relu(state[:, policy.brain.dn_idx]), 0.0, 1.0)
                     activity_frames.append(r_dn[0].cpu().numpy())
             else:
@@ -138,40 +149,82 @@ def capture_visualization_frames(
     return dict(
         highway_frames=np.stack(highway_frames),
         retina_frames=np.stack(retina_frames) if retina_frames else None,
+        retina_raw_frames=np.stack(retina_raw_frames) if retina_raw_frames else None,
         activity_frames=np.stack(activity_frames),
     )
 
 
-def _retina_panel(retina_current: np.ndarray, photo_map: PhotoreceptorMap, frame_size: int) -> np.ndarray:
+def _diverging_colormap(values: np.ndarray) -> np.ndarray:
+    """values: [...] signed floats -> RGB uint8 [..., 3]. Positive -> white
+    (scaled by magnitude), negative -> blue (scaled by magnitude), 0 ->
+    black. Scaled by the array's own max absolute value. Used both for the
+    signed retina current and (where it's always >=0, so only the white
+    branch is exercised) the raw sampled intensity."""
+    scale = np.abs(values).max()
+    scale = scale if scale > 1e-9 else 1.0
+    norm = np.clip(values / scale, -1.0, 1.0)
+    mag = np.clip(np.abs(norm) * 255, 0, 255).astype(np.uint8)
+    rgb = np.zeros(values.shape + (3,), dtype=np.uint8)
+    pos, neg = norm > 0, norm < 0
+    rgb[pos, 0] = mag[pos]
+    rgb[pos, 1] = mag[pos]
+    rgb[pos, 2] = mag[pos]
+    rgb[neg, 2] = mag[neg]
+    return rgb
+
+
+def _gray_to_rgb(gray: np.ndarray) -> np.ndarray:
+    return np.stack([gray, gray, gray], axis=-1)
+
+
+def _retina_panel(retina_signal: np.ndarray, photo_map: PhotoreceptorMap, frame_size: int) -> np.ndarray:
+    """retina_signal: [n_photo] signed current or (always >=0) raw sampled
+    intensity -- caller (main()) picks which via --retina-panel. Returns an
+    RGB [frame_size, frame_size, 3] panel: each photoreceptor's signed value
+    placed at its image position (0 elsewhere -> black background), rendered
+    with the diverging colormap."""
     rows_i = np.clip(np.nan_to_num(photo_map.image_pos[:, 0] * (frame_size - 1)), 0, frame_size - 1).astype(np.int64)
     cols_i = np.clip(np.nan_to_num(photo_map.image_pos[:, 1] * (frame_size - 1)), 0, frame_size - 1).astype(np.int64)
     valid = photo_map.included_mask & ~np.isnan(photo_map.image_pos[:, 0])
-    panel = np.full((frame_size, frame_size), 10, dtype=np.uint8)
-    mag = np.abs(retina_current)
-    scale = mag.max() if mag.max() > 1e-9 else 1.0
-    vals = np.clip((mag / scale) * 255, 0, 255).astype(np.uint8)
-    panel[rows_i[valid], cols_i[valid]] = vals[valid]
-    return panel
+    grid = np.zeros((frame_size, frame_size), dtype=np.float64)
+    grid[rows_i[valid], cols_i[valid]] = retina_signal[valid]
+    return _diverging_colormap(grid)
 
 
-def _activity_raster_panel(activity_frames: np.ndarray, frame: int, frame_size: int, window: int = 128) -> np.ndarray:
-    """activity_frames: [T, n_units]. Shows a scrolling raster (units on the
-    vertical axis, recent time on the horizontal axis) of the last `window`
-    frames up to `frame`, resized to frame_size x frame_size."""
+def zscore_activity_per_neuron(activity_frames: np.ndarray) -> np.ndarray:
+    """activity_frames: [T, n_units] -> per-neuron z-score over the whole
+    clip (mean/std computed over axis 0), so each unit's trace is judged
+    against its own baseline rather than the population's raw magnitude."""
+    mean = activity_frames.mean(axis=0, keepdims=True)
+    std = activity_frames.std(axis=0, keepdims=True)
+    std = np.where(std > 1e-9, std, 1.0)
+    return (activity_frames - mean) / std
+
+
+def _activity_raster_panel(
+    activity_z: np.ndarray, frame: int, frame_size: int, window: int = 128, clip_std: float = 3.0,
+) -> np.ndarray:
+    """activity_z: [T, n_units], already z-scored per neuron over the whole
+    clip (zscore_activity_per_neuron). Shows a scrolling raster (units on
+    the vertical axis, recent time on the horizontal axis) of the last
+    `window` frames up to `frame`, resized to frame_size x frame_size.
+    Magnitude clipped at `clip_std` standard deviations (a fixed scale
+    across the whole clip, not renormalized per window) and rendered as
+    grayscale-in-RGB for consistency with the other (now RGB) panels."""
     lo = max(0, frame - window + 1)
-    hist = activity_frames[lo : frame + 1]  # [<=window, n_units]
+    hist = activity_z[lo : frame + 1]  # [<=window, n_units]
     if hist.shape[0] < window:
         pad = np.zeros((window - hist.shape[0], hist.shape[1]), dtype=hist.dtype)
         hist = np.concatenate([pad, hist], axis=0)
-    mag = np.abs(hist)
-    scale = mag.max() if mag.max() > 1e-9 else 1.0
-    img = np.clip((mag / scale) * 255, 0, 255).astype(np.uint8).T  # [n_units, window]
-    return np.asarray(Image.fromarray(img).resize((frame_size, frame_size), Image.NEAREST))
+    mag = np.clip(np.abs(hist), 0, clip_std)
+    img = np.clip((mag / clip_std) * 255, 0, 255).astype(np.uint8).T  # [n_units, window]
+    gray = np.asarray(Image.fromarray(img).resize((frame_size, frame_size), Image.NEAREST))
+    return _gray_to_rgb(gray)
 
 
 def render_video_frames(
     highway_model: np.ndarray, held_mask: np.ndarray, strum: np.ndarray, events, fret_target: np.ndarray,
-    retina_frames: np.ndarray | None, activity_frames: np.ndarray, photo_map: PhotoreceptorMap, frame_size: int,
+    retina_frames: np.ndarray | None, activity_z: np.ndarray, photo_map: PhotoreceptorMap, frame_size: int,
     fps: int, overlay_text_lines: list[str],
 ) -> list[np.ndarray]:
     n_frames = highway_model.shape[0]
@@ -181,10 +234,10 @@ def render_video_frames(
         event_by_frame.setdefault(e.frame, []).append(e)
 
     lane_w = frame_size // 5
-    n_hits_so_far = 0
+    n_hits_so_far = n_misses_so_far = n_overstrums_so_far = 0
     out_frames = []
     for f in range(n_frames):
-        highway = highway_model[f]
+        highway = _gray_to_rgb(highway_model[f])
 
         panel2 = np.full((frame_size, frame_size), 20, dtype=np.uint8)
         for lane in range(5):
@@ -197,26 +250,47 @@ def render_video_frames(
             panel2[0:4, :] = event_color[e.kind]
             if e.kind == "hit":
                 n_hits_so_far += 1
+            elif e.kind == "miss":
+                n_misses_so_far += 1
+            elif e.kind == "overstrum":
+                n_overstrums_so_far += 1
+        panel2 = _gray_to_rgb(panel2)
 
         panel3 = (
             _retina_panel(retina_frames[f], photo_map, frame_size)
             if retina_frames is not None
-            else np.full((frame_size, frame_size), 10, dtype=np.uint8)
+            else _gray_to_rgb(np.full((frame_size, frame_size), 10, dtype=np.uint8))
         )
-        panel4 = _activity_raster_panel(activity_frames, f, frame_size)
+        panel4 = _activity_raster_panel(activity_z, f, frame_size)
 
         top = np.concatenate([highway, panel2], axis=1)
         bottom = np.concatenate([panel3, panel4], axis=1)
-        grid = np.concatenate([top, bottom], axis=0)  # [2*frame_size, 2*frame_size]
+        grid = np.concatenate([top, bottom], axis=0)  # [2*frame_size, 2*frame_size, 3]
 
-        big = Image.fromarray(grid).resize(
+        big = Image.fromarray(grid, mode="RGB").resize(
             (grid.shape[1] * FRAME_SIZE_DISPLAY_SCALE, grid.shape[0] * FRAME_SIZE_DISPLAY_SCALE), Image.NEAREST
-        ).convert("RGB")
+        )
         canvas = Image.new("RGB", (big.width, big.height + OVERLAY_BAR_H), (0, 0, 0))
         canvas.paste(big, (0, OVERLAY_BAR_H))
         draw = ImageDraw.Draw(canvas)
-        text = " | ".join(overlay_text_lines) + f" | hits: {n_hits_so_far}"
+
+        resolved = n_hits_so_far + n_misses_so_far
+        acc = (n_hits_so_far / resolved) if resolved > 0 else 0.0
+        text = (
+            " | ".join(overlay_text_lines)
+            + f" | hits: {n_hits_so_far} | acc: {acc * 100:.1f}% | overstrums: {n_overstrums_so_far}"
+        )
         draw.text((4, 6), text, fill=(255, 255, 255))
+
+        # Legend for the targets-vs-actions panel (top-right quadrant of the
+        # 2x2 grid): panel2 draws target in the bottom half, the model's own
+        # held frets in the top half (overwritten by a 4px event-color bar
+        # at the very top on hit/miss/overstrum frames).
+        legend_x = big.width // 2 + 4
+        legend_y = OVERLAY_BAR_H + 4
+        draw.text((legend_x, legend_y), "top: actual  bottom: target", fill=(255, 255, 255))
+        draw.text((legend_x, legend_y + 10), "bar: hit=white miss=dark overstrum=light", fill=(255, 255, 255))
+
         out_frames.append(np.asarray(canvas))
     return out_frames
 
@@ -282,12 +356,15 @@ def main() -> None:
 
     fret_target, _ = compute_frame_labels(result["excerpt_notes"], entry.excerpt_s, fps, hit_window_s)
 
+    retina_display = vis["retina_raw_frames"] if args.retina_panel == "raw" else vis["retina_frames"]
+    activity_z = zscore_activity_per_neuron(vis["activity_frames"])
+
     run_name = run_dir.name
     step = ckpt["step"]
     song_slug = "".join(c if c.isalnum() else "_" for c in entry.song.title)[:40]
     frames = render_video_frames(
         vis["highway_frames"], result["held_mask"], result["strum"], result["events"], fret_target,
-        vis["retina_frames"], vis["activity_frames"], photo_map, cfg_game["frame_size"], fps,
+        retina_display, activity_z, photo_map, cfg_game["frame_size"], fps,
         overlay_text_lines=[run_name, f"step {step}", difficulty, f"{entry.song.artist} - {entry.song.title}"],
     )
 

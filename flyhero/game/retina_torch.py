@@ -83,6 +83,7 @@ class TorchRetina:
     ema_alpha: float
     blur_sigma: float
     ema: torch.Tensor | None = field(default=None, init=False, repr=False)
+    last_intensity: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def build(
@@ -100,6 +101,7 @@ class TorchRetina:
 
     def reset(self) -> None:
         self.ema = None
+        self.last_intensity = None
 
     def step(self, frames_uint8: torch.Tensor) -> torch.Tensor:
         """frames_uint8: [B,H,W] (uint8 or any dtype convertible to float).
@@ -113,4 +115,9 @@ class TorchRetina:
             self.ema = intensity.clone()
         current = self.gain * (intensity - self.ema)
         self.ema = self.ema_alpha * intensity + (1 - self.ema_alpha) * self.ema
+        # Sampled intensity before the EMA adaptation filter is subtracted
+        # out -- not used by the brain (invariant 1: only `current` is
+        # injected), kept only for scripts/render_gameplay_video.py's
+        # --retina-panel raw option.
+        self.last_intensity = intensity * self.included_mask.to(intensity.dtype)
         return current * self.included_mask.to(current.dtype)
