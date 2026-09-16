@@ -220,6 +220,34 @@ def assign_type_id(annotations: pl.DataFrame) -> tuple[np.ndarray, list[str], di
     return type_id, unique_names, level_count_map
 
 
+def resolve_positions(annotations: pl.DataFrame, n_nodes: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-neuron position, preferring soma_x/y/z and falling back to the
+    pos_x/y/z anchor point where soma is null (e.g. photoreceptors, whose
+    somata sit in the retina outside the FAFB volume). A neuron-level
+    fallback, not a column-level one: soma_x/y/z exists as a column for
+    every neuron, but is null row-by-row for many of them."""
+    has_soma_cols = all(c in annotations.columns for c in ("soma_x", "soma_y", "soma_z"))
+    has_pos_cols = all(c in annotations.columns for c in ("pos_x", "pos_y", "pos_z"))
+
+    result = np.full((n_nodes, 3), np.nan, dtype=np.float64)
+    source = np.full(n_nodes, "none", dtype=object)
+
+    if has_soma_cols:
+        soma_arr = annotations.select(["soma_x", "soma_y", "soma_z"]).to_numpy().astype(np.float64)
+        soma_valid = ~np.isnan(soma_arr).any(axis=1)
+        result[soma_valid] = soma_arr[soma_valid]
+        source[soma_valid] = "soma"
+
+    if has_pos_cols:
+        pos_arr = annotations.select(["pos_x", "pos_y", "pos_z"]).to_numpy().astype(np.float64)
+        pos_valid = ~np.isnan(pos_arr).any(axis=1)
+        needs_pos = (source == "none") & pos_valid
+        result[needs_pos] = pos_arr[needs_pos]
+        source[needs_pos] = "anchor"
+
+    return result, source
+
+
 def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
     raw_dir = Path(cfg["raw_dir"])
     processed_dir = Path(cfg["processed_dir"])
@@ -323,18 +351,78 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
     t4t5_set = set(t4t5_cell_types)
     t4t5_idx = np.array([i for i, ct in enumerate(cell_types) if ct in t4t5_set], dtype=np.int64)
 
-    def pos_columns(cols: list[str]) -> np.ndarray | None:
-        if all(c in annotations.columns for c in cols):
-            arr = annotations.select(cols).to_numpy().astype(np.float64)
-            return arr
-        return None
-
-    pos_voxel = pos_columns(["soma_x", "soma_y", "soma_z"])
-    if pos_voxel is None:
-        pos_voxel = pos_columns(["pos_x", "pos_y", "pos_z"])
-    if pos_voxel is None:
-        pos_voxel = np.full((n_nodes, 3), np.nan, dtype=np.float64)
+    pos_voxel, pos_source = resolve_positions(annotations, n_nodes)
     pos_nm = pos_voxel * VOXEL_TO_NM  # D15
+
+    pos_source_counts = {name: int((pos_source == name).sum()) for name in ("soma", "anchor", "none")}
+    photoreceptor_mask = np.isin(np.arange(n_nodes), input_idx_photoreceptor)
+    pos_source_counts_photoreceptor = {
+        name: int(((pos_source == name) & photoreceptor_mask).sum()) for name in ("soma", "anchor", "none")
+    }
+    pos_source_code = {"soma": 0, "anchor": 1, "none": 2}
+    pos_source_id = np.array([pos_source_code[s] for s in pos_source], dtype=np.int8)
+
+    photoreceptor_side_counts: dict[str, int] = {}
+    if "side" in annotations.columns:
+        sides = annotations.select("side").to_series().fill_null("na").to_list()
+        for ct, side in zip(cell_types, sides):
+            if ct in photoreceptor_set:
+                key = f"{ct}_{side}"
+                photoreceptor_side_counts[key] = photoreceptor_side_counts.get(key, 0) + 1
+
+    pair_counts = np.bincount(pair_id)
+    n_edges_total = len(pre)
+    edge_sign_report = {
+        "n_edges": int(n_edges_total),
+        "n_sign_negative": int((sign == -1).sum()),
+        "n_sign_positive": int((sign == 1).sum()),
+    }
+    pair_size_distribution = []
+    for thresh in (1, 2, 5, 10, 20):
+        fine_mask = pair_counts >= thresh
+        pair_size_distribution.append(
+            {
+                "min_edges": thresh,
+                "n_pairs": int(fine_mask.sum()),
+                "n_edges_covered": int(pair_counts[fine_mask].sum()),
+            }
+        )
+
+    # D16: exact (not just the 5 reported thresholds) search for the largest
+    # k with fine-pair edge coverage >= 90%, plus the hybrid parameter count
+    # at that k (fine pairs keep their own gain; the rest share a coarse
+    # (pre_type, post_super_class) bucket).
+    max_k_candidate = int(pair_counts.max())
+    best_k, best_coverage = 1, 1.0
+    for k in range(1, max_k_candidate + 1):
+        coverage = pair_counts[pair_counts >= k].sum() / n_edges_total
+        if coverage >= 0.90:
+            best_k, best_coverage = k, float(coverage)
+        else:
+            break
+    fine_mask_at_k = pair_counts >= best_k
+    n_fine_pairs_at_k = int(fine_mask_at_k.sum())
+    edge_is_fine_at_k = fine_mask_at_k[pair_id]
+    leftover_edges = np.nonzero(~edge_is_fine_at_k)[0]
+    coarse_keys = set(
+        zip(type_id[pre[leftover_edges]].tolist(), super_class_id[post[leftover_edges]].tolist())
+    )
+    hybrid_gain_sharing = {
+        "k": best_k,
+        "edge_coverage_at_k": best_coverage,
+        "edge_coverage_at_k_plus_1": (
+            float(pair_counts[pair_counts >= best_k + 1].sum() / n_edges_total)
+            if best_k + 1 <= max_k_candidate
+            else 0.0
+        ),
+        "n_fine_pairs": n_fine_pairs_at_k,
+        "n_coarse_buckets": len(coarse_keys),
+        "n_total_gain_params": n_fine_pairs_at_k + len(coarse_keys),
+        "n_pure_fine_params": int(len(unique_pairs)),
+        "n_pure_coarse_params": len(
+            set(zip(type_id[pre].tolist(), super_class_id[post].tolist()))
+        ),
+    }
 
     np.savez(
         processed_dir / "graph.npz",
@@ -353,6 +441,7 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
         t4t5_idx=t4t5_idx,
         pos_voxel=pos_voxel.astype(np.float32),
         pos_nm=pos_nm.astype(np.float32),
+        pos_source_id=pos_source_id,  # 0=soma, 1=anchor, 2=none
     )
 
     meta = {
@@ -374,6 +463,12 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
             "pos_voxel": "raw FlyWire soma/anchor voxel coordinates, resolution 4x4x40 nm/voxel",
             "pos_nm": "pos_voxel scaled by (4, 4, 40) to nanometers",
         },
+        "pos_source_counts": pos_source_counts,
+        "pos_source_counts_photoreceptor": pos_source_counts_photoreceptor,
+        "photoreceptor_side_counts": photoreceptor_side_counts,
+        "edge_sign_report": edge_sign_report,
+        "pair_size_distribution": pair_size_distribution,
+        "hybrid_gain_sharing": hybrid_gain_sharing,
     }
     with (processed_dir / "graph_meta.json").open("w") as f:
         json.dump(meta, f, indent=2)

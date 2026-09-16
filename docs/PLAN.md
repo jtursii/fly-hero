@@ -157,15 +157,19 @@ Design: a top-down highway with 5 vertical lanes. Notes scroll downward at const
 **Tasks**
 1. `brain/rate_model.py`, `ConnectomeBrain(graph, cfg)`:
    ```
-   r      = clamp(relu(v), 0, 1)                                  # [B, N]
-   w      = sign * softplus(g[pair_id]) * count * inv_norm[post]  # [E]
-   syn    = zeros_like(v).index_add_(1, post, r[:, pre] * w)      # [B, N]
+   r      = clamp(relu(v), 0, 1)                                        # [B, N]
+   w      = sign * softplus(g[gain_group_id]) * count * inv_norm[post]  # [E]
+   syn    = zeros_like(v).index_add_(1, post, r[:, pre] * w)            # [B, N]
    v_next = v + (dt / tau[type_id]) * (-v + syn + b[type_id] + I_in)
    ```
    - `dt = 1/120` s (2 substeps per 60 Hz frame).
    - `tau` clamped ≥ 20 ms, initialized to 50 ms.
    - `softplus(g)` initialized ≈ `gain0` (config). `b` = 0.
    - `I_in` is nonzero only at `input_idx`.
+   - **Gain sharing (D16, config `gain_sharing: fine | coarse | hybrid`, default `hybrid`)**: Phase 1's Gate G1 found 410,768 realized (pre_type, post_type) pairs, over the plan's 300k threshold. `gain_group_id` per edge is derived from `graph.npz`'s `pair_id`/`type_id`/`super_class_id` (no graph rebuild needed):
+     - `fine`: `gain_group_id = pair_id` (410,768 params).
+     - `coarse`: `gain_group_id` keyed by `(pre_type, post_super_class)` (22,212 params). Used for the Phase 5 ES stretch goal.
+     - `hybrid` (default): a pair keeps its own `pair_id` if it has ≥ `k` edges, else it's remapped to the `coarse` bucket for its `(pre_type, post_super_class)`. `k` defaults to 2 (the largest threshold with fine-pair edge coverage ≥ 90%, per `docs/graph_report.md`), giving 244,824 fine + 18,925 coarse = 263,749 params.
 2. `brain/readout.py`: `Linear(len(dn_idx), 6)` on DN rates averaged over each frame's substeps → logits (5 frets + strum).
 3. `bench/bench_brain.py`:
    - Sweep device × dtype × batch {1, 8, 32} × `min_syn` {5, 10}.
@@ -230,6 +234,7 @@ If the gate still fails, showcase at Easy and document it honestly.
 2. Choose 3 **test-split** showcase songs (never trained on) at the highest difficulty where the model's `hit_rate` ≥ 0.70. Prefer songs the user likes and that are ≤ 4 min. **The user picks the final set.**
 3. **Stretch (only if on schedule): ES fine-tune** in `train/es.py`.
    - Mirrored-sampling OpenAI-ES over brain parameters + readout. Population 32, σ = 0.02.
+   - Gain sharing forced to `coarse` (D16) regardless of what BC trained with — fewer params (22,212) to keep the population/fitness-evaluation budget tractable.
    - Fitness = full-song score from `rules.py` on train songs.
    - Time-box to 4 h. Keep the result only if test `hit_rate` improves.
 

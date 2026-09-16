@@ -32,9 +32,15 @@ def _write_fixtures(tmp_path):
             "super_class": ["sensory", "optic", "central", "descending", "central", "sensory"],
             "top_nt": ["ach", "ach", "gaba", "ach", None, "glut"],
             "top_nt_conf": [0.9, 0.9, 0.9, 0.9, None, 0.9],
-            "soma_x": [100.0, 200.0, 300.0, 400.0, 500.0, 600.0],
-            "soma_y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-            "soma_z": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            # neuron 1 (R1-6) has no soma in-volume (real photoreceptors: the
+            # retina sits outside FAFB), so it must fall back to pos_x/y/z.
+            "soma_x": [None, 200.0, 300.0, 400.0, 500.0, 600.0],
+            "soma_y": [None, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "soma_z": [None, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "pos_x": [9000.0, 9200.0, 9300.0, 9400.0, 9500.0, 9600.0],
+            "pos_y": [900.0, 920.0, 930.0, 940.0, 950.0, 960.0],
+            "pos_z": [90.0, 92.0, 93.0, 94.0, 95.0, 96.0],
+            "side": ["left", "left", "left", "left", "left", "right"],
         }
     )
     annotations.write_csv(raw_dir / "annotations.tsv", separator="\t")
@@ -145,6 +151,16 @@ def test_build_graph_index_round_trip(tmp_path):
     np.testing.assert_allclose(
         graph["pos_nm"][idx_1], graph["pos_voxel"][idx_1] * np.array([4, 4, 40]), rtol=1e-5
     )
+
+    # Neuron 1 (R1-6) has no soma in-volume -> falls back to the pos_x/y/z
+    # anchor point, not left as NaN. Neuron 2 has a soma -> uses it directly.
+    idx_2 = root_to_idx[2]
+    np.testing.assert_allclose(graph["pos_voxel"][idx_1], [9000.0, 900.0, 90.0])
+    assert graph["pos_source_id"][idx_1] == 1  # anchor
+    np.testing.assert_allclose(graph["pos_voxel"][idx_2], [200.0, 20.0, 2.0])
+    assert graph["pos_source_id"][idx_2] == 0  # soma
+    assert meta["pos_source_counts_photoreceptor"] == {"soma": 1, "anchor": 1, "none": 0}
+    assert meta["photoreceptor_side_counts"] == {"R1-6_left": 1, "R7_right": 1}
 
 
 def test_assign_type_id_falls_back_to_singleton():

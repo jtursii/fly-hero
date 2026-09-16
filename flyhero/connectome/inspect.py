@@ -46,6 +46,25 @@ def render_report(meta: dict[str, Any]) -> str:
         f"- Lamina-matched neurons (L1-L3, both sides): {meta['n_input_lamina']:,}",
         f"- **Chosen input layer: {input_layer}** ({n_input:,} neurons; gate floor is 500).",
         f"- T4/T5 neurons matched: {meta['n_t4t5']:,}",
+        "- Photoreceptor counts per cell_type per side:",
+    ]
+    for key, count in sorted(meta["photoreceptor_side_counts"].items()):
+        lines.append(f"  - {key}: {count:,}")
+    lines += [
+        "",
+        "## Photoreceptor positions: soma vs. anchor (D15)",
+        (
+            f"- All neurons: {meta['pos_source_counts']['soma']:,} from `soma_x/y/z`, "
+            f"{meta['pos_source_counts']['anchor']:,} fell back to the `pos_x/y/z` anchor point, "
+            f"{meta['pos_source_counts']['none']:,} had neither."
+        ),
+        (
+            f"- Photoreceptors only: {meta['pos_source_counts_photoreceptor']['soma']:,} from soma, "
+            f"**{meta['pos_source_counts_photoreceptor']['anchor']:,} from the anchor point** "
+            f"(expected: photoreceptor somata sit in the retina, outside the FAFB volume, "
+            f"so `soma_x/y/z` is null for almost all of them and `pos_x/y/z` is used instead), "
+            f"{meta['pos_source_counts_photoreceptor']['none']:,} had neither."
+        ),
         "",
         "## Cell-type assignment (D14: cell_type -> hemibrain_type -> cell_class -> singleton)",
     ]
@@ -73,11 +92,50 @@ def render_report(meta: dict[str, Any]) -> str:
     for row in nt.get("per_transmitter_edge_counts", []):
         sign = NT_SIGN.get(row["nt_name"], 1)
         lines.append(f"  - {row['nt_name']} ({sign:+d}): {row['edge_count']:,}")
+    edge_sign = meta["edge_sign_report"]
+    n_edges = edge_sign["n_edges"]
     lines += [
         "",
         "## Positions (D15)",
         f"- `pos_voxel`: {meta['pos_units']['pos_voxel']}",
         f"- `pos_nm`: {meta['pos_units']['pos_nm']}",
+        "",
+        "## Edge sign share (post-alias-fix)",
+        (
+            f"- sign -1 (inhibitory): {edge_sign['n_sign_negative']:,} / {n_edges:,} "
+            f"({edge_sign['n_sign_negative'] / n_edges:.2%})"
+        ),
+        (
+            f"- sign +1 (excitatory): {edge_sign['n_sign_positive']:,} / {n_edges:,} "
+            f"({edge_sign['n_sign_positive'] / n_edges:.2%})"
+        ),
+        "",
+        "## Type-pair size distribution (for D16 gain-sharing)",
+        "| min edges per pair | pairs at/above | share of pairs | edges covered | share of edges |",
+        "|---|---|---|---|---|",
+    ]
+    for row in meta["pair_size_distribution"]:
+        pair_share = row["n_pairs"] / meta["n_type_pairs"]
+        edge_share = row["n_edges_covered"] / n_edges
+        lines.append(
+            f"| {row['min_edges']} | {row['n_pairs']:,} | {pair_share:.2%} | "
+            f"{row['n_edges_covered']:,} | {edge_share:.2%} |"
+        )
+    hg = meta["hybrid_gain_sharing"]
+    lines += [
+        "",
+        f"- D16 hybrid: smallest-parameter-count k with fine-pair edge coverage >= 90% is "
+        f"**k={hg['k']}** (coverage {hg['edge_coverage_at_k']:.2%}; k={hg['k'] + 1} would drop to "
+        f"{hg['edge_coverage_at_k_plus_1']:.2%}).",
+        (
+            f"- Hybrid (k={hg['k']}) gain parameter count: {hg['n_fine_pairs']:,} fine pairs + "
+            f"{hg['n_coarse_buckets']:,} coarse `(pre_type, post_super_class)` buckets = "
+            f"**{hg['n_total_gain_params']:,} total**."
+        ),
+        (
+            f"- For reference: pure fine (pre_type, post_type) = {hg['n_pure_fine_params']:,} params; "
+            f"pure coarse (pre_type, post_super_class), used by ES = {hg['n_pure_coarse_params']:,} params."
+        ),
         "",
         "## Gate G1 checklist",
         f"- Proofread neurons ~138.6k? Actual final node count: {meta['n_proofread_annotated']:,}",
