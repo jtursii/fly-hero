@@ -202,7 +202,16 @@ class ConnectomeBrain(nn.Module):
 
         tau_init = float(cfg["tau_init_s"])
         self.tau = nn.Parameter(torch.full((self.n_types,), tau_init, dtype=dtype, device=device))
-        self.bias = nn.Parameter(torch.zeros(self.n_types, dtype=dtype, device=device))
+        # D25: bias initialized to a small positive tonic baseline, not 0
+        # (PLAN.md's original default). With b=0 and every photoreceptor's
+        # outgoing synapse forced inhibitory (D12), no non-photoreceptor
+        # neuron could ever reach r>0 at any gain0 -- there was no tonic
+        # activity for that inhibition to modulate via disinhibition, which
+        # is how this pathway actually signals in real fly vision. Proven by
+        # the gain0 stability sweep (docs/gain0_stability.md): 0/128,123
+        # non-photoreceptor neurons ever activated, tested up to gain0=10,000.
+        bias_init = float(cfg["bias_init"])
+        self.bias = nn.Parameter(torch.full((self.n_types,), bias_init, dtype=dtype, device=device))
 
         gain0 = float(cfg["gain0"])
         g_init = softplus_inverse(gain0)

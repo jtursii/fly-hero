@@ -164,7 +164,7 @@ Design: a top-down highway with 5 vertical lanes. Notes scroll downward at const
    ```
    - `dt = 1/120` s (2 substeps per 60 Hz frame).
    - `tau` clamped ≥ 20 ms, initialized to 50 ms.
-   - `softplus(g)` initialized ≈ `gain0` (config). `b` = 0.
+   - `softplus(g)` initialized ≈ `gain0` (config). `b` initialized to a small positive tonic baseline (`bias_init` config, D25 -- amended from this plan's original `b = 0`: with every photoreceptor's outgoing synapse forced inhibitory (D12) and no tonic activity for that inhibition to modulate via disinhibition, `b = 0` made it impossible for any non-photoreceptor neuron to ever reach `r > 0` at any `gain0`, proven and tested up to `gain0 = 10,000` -- see `docs/gain0_stability.md`).
    - `I_in` is nonzero only at `input_idx`.
    - **Gain sharing (D16, config `gain_sharing: fine | coarse | hybrid`, default `hybrid`)**: Phase 1's Gate G1 found 410,768 realized (pre_type, post_type) pairs, over the plan's 300k threshold. `gain_group_id` per edge is derived from `graph.npz`'s `pair_id`/`type_id`/`super_class_id` (no graph rebuild needed):
      - `fine`: `gain_group_id = pair_id` (410,768 params).

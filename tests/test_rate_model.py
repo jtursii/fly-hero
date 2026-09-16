@@ -27,6 +27,7 @@ _BRAIN_CFG = dict(
     dt=1 / 120,
     tau_min_s=0.02,
     tau_init_s=0.05,
+    bias_init=0.2,
     gain_sharing="hybrid",
     gain_sharing_k=2,
     gain0=1.0,

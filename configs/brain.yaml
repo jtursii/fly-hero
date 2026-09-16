@@ -7,6 +7,21 @@ substeps_per_frame: 2
 tau_init_s: 0.05
 tau_min_s: 0.02
 
+# D25: a small positive tonic baseline, not 0 (PLAN.md's original default).
+# With b=0 and D12's photoreceptor-output-sign=-1, no non-photoreceptor
+# neuron could ever reach r>0 at any gain0 (proven, see
+# docs/gain0_stability.md) -- there was no tonic activity for inhibition to
+# modulate via disinhibition. An initial guess of 0.2 fixed that but was
+# itself too high relative to active_r_threshold=0.01 -- a uniform bias
+# well above the "active" threshold makes almost the entire population read
+# as trivially "active" at rest, regardless of gain0, saturating the sweep's
+# active_frac check even though real signal reach existed underneath it.
+# 0.005 (just below the threshold) keeps the resting population's active
+# fraction low while still letting disinhibition-driven excursions cross it
+# -- chosen from re-running scripts/gain0_sweep.py over bias_init in
+# {0.005, 0.02, 0.05, 0.1}, not independently derived.
+bias_init: 0.005
+
 # D16: fine (one g per realized (pre_type,post_type) pair) / coarse (one g
 # per (pre_type,post_super_class)) / hybrid (default: fine if a pair has
 # >=k edges, else falls back to its coarse bucket). k=2 is the largest
@@ -15,9 +30,13 @@ tau_min_s: 0.02
 gain_sharing: "hybrid"
 gain_sharing_k: 2
 
-# Placeholder until scripts/gain0_sweep.py picks a value that keeps
-# untrained activity stable (see docs/gain0_stability.md once written).
-gain0: 1.0
+# Chosen by scripts/gain0_sweep.py (docs/gain0_stability.md): with
+# bias_init=0.005, both gain0=10.0 and gain0=30.0 clear the stability sweep
+# (active_frac in [0.01,0.30], DN reach_frac>0.10, no NaN). 10.0 is the more
+# conservative choice (smaller max|v| for the same low-in-degree outlier
+# neurons that scale ~linearly with gain0); 30.0 gives a larger reach_frac
+# margin (0.468 vs 0.303) if that's preferred once training starts.
+gain0: 10.0
 
 readout:
   n_actions: 6  # 5 frets + strum
