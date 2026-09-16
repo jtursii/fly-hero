@@ -36,7 +36,8 @@ from typing import Any
 
 from flyhero.game.chart_parser import parse_chart
 from flyhero.game.midi_parser import parse_midi
-from flyhero.game.song import ParsedDifficulty, Song, compute_song_id, save_song
+from flyhero.game.rules import max_simultaneous_open_windows
+from flyhero.game.song import ParsedDifficulty, Song, compute_song_id, merge_close_notes, save_song
 from flyhero.library.scan import find_song_folders
 from flyhero.utils.config import load_config
 from flyhero.utils.text import read_text_lenient
@@ -290,13 +291,29 @@ def write_cached_songs(
     usable: list[ParseOutcome],
     kept_map: dict[str, dict[str, ParsedDifficulty]],
     songs_dir: Path,
-) -> None:
+    chord_merge_min_gap_s: float,
+    hit_window_s: float,
+) -> dict:
+    """Writes the cache UNMERGED (song.py's load-time chord merge never
+    touches it), but also computes, per difficulty, what the merge and the
+    hit-window sweep would look like on the merged notes -- these become the
+    "report counts per difficulty" and the "max simultaneously-open hit
+    windows across the library" that tasks 6-11 asked for, without a second
+    read-back pass over every cached file."""
     songs_dir.mkdir(parents=True, exist_ok=True)
+    merge_counts_by_diff: dict[str, int] = defaultdict(int)
+    max_open_by_diff: dict[str, int] = defaultdict(int)
+
     for o in usable:
         cand = o.candidate
         kept = kept_map[cand.rel_path]
         duration_s = compute_duration_s(cand.song_length_s, kept)
         for diff, pd in kept.items():
+            merged_notes, n_absorbed = merge_close_notes(pd.notes, chord_merge_min_gap_s)
+            merge_counts_by_diff[diff] += n_absorbed
+            n_open = max_simultaneous_open_windows(merged_notes, hit_window_s)
+            max_open_by_diff[diff] = max(max_open_by_diff[diff], n_open)
+
             song = Song(
                 song_id=cand.song_id,
                 title=cand.title,
@@ -309,6 +326,14 @@ def write_cached_songs(
                 ini_delay_s=cand.delay_s,
             )
             save_song(song, songs_dir / f"{cand.song_id}_{diff}.npz")
+
+    return {
+        "merge_counts_by_difficulty": dict(merge_counts_by_diff),
+        "max_open_by_difficulty": dict(max_open_by_diff),
+        "overall_max_simultaneous_open_windows": (
+            max(max_open_by_diff.values()) if max_open_by_diff else 0
+        ),
+    }
 
 
 def compute_split_stratum_difficulty_counts(
@@ -336,6 +361,8 @@ def render_ingest_report_section(
     exact_dup_log: list[dict],
     near_dup_log: list[dict],
     split_counts: dict[str, int],
+    merge_counts_by_diff: dict[str, int],
+    max_open_by_diff: dict[str, int],
 ) -> str:
     lines = ["## Ingest results (Phase 2)\n"]
     lines.append(f"Song folders considered: **{n_candidates}**\n")
@@ -368,6 +395,23 @@ def render_ingest_report_section(
     for key, count in split_counts.items():
         lines.append(f"- {key}: {count}")
 
+    total_merges = sum(merge_counts_by_diff.values())
+    lines.append(
+        f"\n### Chord merges at load time (< 1/60s apart; never applied to the "
+        f"cache), by difficulty across the library ({total_merges} total notes absorbed)\n"
+    )
+    for diff in DIFFICULTIES:
+        lines.append(f"- {diff}: {merge_counts_by_diff.get(diff, 0)}")
+
+    overall_max_open = max(max_open_by_diff.values()) if max_open_by_diff else 0
+    lines.append(
+        f"\n### Max simultaneously-open hit windows (post-merge, "
+        f"+-hit_window_s), by difficulty -- sets env.py's/RuleEngine's "
+        f"max_open capacity (library-wide max: **{overall_max_open}**)\n"
+    )
+    for diff in DIFFICULTIES:
+        lines.append(f"- {diff}: {max_open_by_diff.get(diff, 0)}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -387,6 +431,8 @@ def run_ingest(
     sustain_min_beats = cfg["sustain_min_beats"]
     open_note_exclude_frac = cfg["open_note_exclude_frac"]
     split_cfg = cfg["split"]
+    chord_merge_min_gap_s = cfg["chord_merge_min_gap_s"]
+    hit_window_s = cfg["hit_window_s"]
 
     candidates = collect_candidates(root)
     outcomes = [parse_song_folder(c, sustain_min_beats) for c in candidates]
@@ -406,7 +452,9 @@ def run_ingest(
     assignment = stratified_group_split(groups, split_cfg)
 
     usable = [o for o in survivors if kept_map[o.candidate.rel_path]]
-    write_cached_songs(usable, kept_map, processed_dir / "songs")
+    cache_stats = write_cached_songs(
+        usable, kept_map, processed_dir / "songs", chord_merge_min_gap_s, hit_window_s
+    )
 
     splits: dict[str, list[str]] = {"train": [], "val": [], "test": []}
     for song_id, split_name in assignment.items():
@@ -418,7 +466,14 @@ def run_ingest(
     split_counts = compute_split_stratum_difficulty_counts(groups, assignment, kept_map)
 
     section = render_ingest_report_section(
-        len(candidates), parse_failures, open_exclusions, exact_dup_log, near_dup_log, split_counts
+        len(candidates),
+        parse_failures,
+        open_exclusions,
+        exact_dup_log,
+        near_dup_log,
+        split_counts,
+        cache_stats["merge_counts_by_difficulty"],
+        cache_stats["max_open_by_difficulty"],
     )
     append_ingest_section(report_path, section)
 
@@ -433,6 +488,9 @@ def run_ingest(
         "near_dup_log": near_dup_log,
         "split_counts": split_counts,
         "n_songs_written": len(usable),
+        "merge_counts_by_difficulty": cache_stats["merge_counts_by_difficulty"],
+        "max_open_by_difficulty": cache_stats["max_open_by_difficulty"],
+        "overall_max_simultaneous_open_windows": cache_stats["overall_max_simultaneous_open_windows"],
     }
 
 
@@ -459,6 +517,14 @@ def main() -> int:
     print(f"Exact-duplicate drops: {len(summary['exact_dup_log'])}")
     print(f"Near-duplicate groups (reported only): {len(summary['near_dup_log'])}")
     print(f"Songs written: {summary['n_songs_written']}")
+    print(
+        "Chord merges (total notes absorbed): "
+        f"{sum(summary['merge_counts_by_difficulty'].values())}"
+    )
+    print(
+        "Max simultaneously-open hit windows (library-wide): "
+        f"{summary['overall_max_simultaneous_open_windows']}"
+    )
     print(f"Report appended to {args.report}")
 
     if args.summary_json:

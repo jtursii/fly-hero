@@ -2,9 +2,32 @@ processed_dir: "data/processed"
 
 sustain_min_beats: 0.5
 open_note_exclude_frac: 0.10
+chord_merge_min_gap_s: 0.016667  # 1/60s, applied at load time only, never cached
 
 split:
   train: 0.8
   val: 0.1
   test: 0.1
   seed: 0
+
+fps: 60
+hit_window_s: 0.07
+lookahead_s: 1.0
+frame_size: 64
+
+reward:
+  hit: 1.0
+  miss: -1.0
+  overstrum: -0.3
+  sustain_frame: 0.01
+
+# Confirmed against the real library by ingest.py's "max simultaneously-open
+# hit windows" report (post-merge, +-hit_window_s): library-wide max is 8
+# (Expert 8, Hard 3, Medium 2, Easy 2) -- not a guess. RuleEngine/env.py's
+# max_open capacity is set from this measured number.
+max_open_notes_capacity: 8
+
+retina:
+  gain: 4.0
+  ema_alpha: 0.2
+  blur_sigma: 1.0

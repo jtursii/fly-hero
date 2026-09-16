@@ -93,6 +93,59 @@ def save_song(song: Song, path: Path) -> None:
     )
 
 
+def merge_close_notes(notes: np.ndarray, min_gap_s: float) -> tuple[np.ndarray, int]:
+    """Merge notes closer than `min_gap_s` into a chord, at load time only --
+    never applied to the cache written by ingest.py. Anchor-based: each run's
+    anchor is its first (earliest) note, and a subsequent note joins the run
+    if it is within `min_gap_s` of the *anchor*, not the previous note, so a
+    chain of sub-threshold gaps can't collapse an entire trill into one note.
+    A merged note takes lane_mask=OR, sustain_s=max, flags=OR, and the
+    anchor's time_s. Returns (merged_notes, n_notes_absorbed)."""
+    if len(notes) == 0:
+        return notes, 0
+
+    groups: list[dict] = []
+    anchor_time = float(notes["time_s"][0])
+    current = {
+        "time_s": anchor_time,
+        "lane_mask": int(notes["lane_mask"][0]),
+        "sustain_s": float(notes["sustain_s"][0]),
+        "flags": int(notes["flags"][0]),
+    }
+    n_absorbed = 0
+    for i in range(1, len(notes)):
+        t = float(notes["time_s"][i])
+        if t - anchor_time < min_gap_s:
+            current["lane_mask"] |= int(notes["lane_mask"][i])
+            current["sustain_s"] = max(current["sustain_s"], float(notes["sustain_s"][i]))
+            current["flags"] |= int(notes["flags"][i])
+            n_absorbed += 1
+        else:
+            groups.append(current)
+            anchor_time = t
+            current = {
+                "time_s": anchor_time,
+                "lane_mask": int(notes["lane_mask"][i]),
+                "sustain_s": float(notes["sustain_s"][i]),
+                "flags": int(notes["flags"][i]),
+            }
+    groups.append(current)
+
+    merged = np.zeros(len(groups), dtype=NOTE_DTYPE)
+    for i, g in enumerate(groups):
+        merged[i] = (g["time_s"], g["lane_mask"], g["sustain_s"], g["flags"])
+    return merged, n_absorbed
+
+
+def load_song_merged(path: Path, min_gap_s: float = 1.0 / 60.0) -> Song:
+    """The loader tasks 6-10 (labels/rules/render/retina/sim/env) must use --
+    never raw load_song() -- so every gameplay-facing consumer sees the same
+    (merged) note sequence."""
+    song = load_song(path)
+    song.notes, _ = merge_close_notes(song.notes, min_gap_s)
+    return song
+
+
 def load_song(path: Path) -> Song:
     data: dict[str, Any] = np.load(path, allow_pickle=False)
     return Song(

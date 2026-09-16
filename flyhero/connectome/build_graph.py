@@ -363,12 +363,23 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
     pos_source_id = np.array([pos_source_code[s] for s in pos_source], dtype=np.int8)
 
     photoreceptor_side_counts: dict[str, int] = {}
-    if "side" in annotations.columns:
-        sides = annotations.select("side").to_series().fill_null("na").to_list()
-        for ct, side in zip(cell_types, sides):
-            if ct in photoreceptor_set:
-                key = f"{ct}_{side}"
-                photoreceptor_side_counts[key] = photoreceptor_side_counts.get(key, 0) + 1
+    sides = (
+        annotations.select("side").to_series().fill_null("na").to_list()
+        if "side" in annotations.columns
+        else ["na"] * n_nodes
+    )
+    for ct, side in zip(cell_types, sides):
+        if ct in photoreceptor_set:
+            key = f"{ct}_{side}"
+            photoreceptor_side_counts[key] = photoreceptor_side_counts.get(key, 0) + 1
+
+    # Not topology (invariant 3 only fixes topology/synapse counts/edge
+    # signs) -- per-node metadata used by Phase 2's retina.py to split
+    # photoreceptors into left/right eye groups for the visual-field
+    # projection (the raw annotations have no column/ommatidia ID, per Phase
+    # 2's retina design).
+    side_code = {"left": 0, "right": 1, "center": 2, "na": 3}
+    side_id = np.array([side_code.get(s, 3) for s in sides], dtype=np.int8)
 
     pair_counts = np.bincount(pair_id)
     n_edges_total = len(pre)
@@ -442,6 +453,7 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
         pos_voxel=pos_voxel.astype(np.float32),
         pos_nm=pos_nm.astype(np.float32),
         pos_source_id=pos_source_id,  # 0=soma, 1=anchor, 2=none
+        side_id=side_id,  # 0=left, 1=right, 2=center, 3=na
     )
 
     meta = {
@@ -466,6 +478,7 @@ def build_graph(cfg: dict[str, Any]) -> dict[str, Any]:
         "pos_source_counts": pos_source_counts,
         "pos_source_counts_photoreceptor": pos_source_counts_photoreceptor,
         "photoreceptor_side_counts": photoreceptor_side_counts,
+        "side_counts": {name: int((side_id == code).sum()) for name, code in side_code.items()},
         "edge_sign_report": edge_sign_report,
         "pair_size_distribution": pair_size_distribution,
         "hybrid_gain_sharing": hybrid_gain_sharing,

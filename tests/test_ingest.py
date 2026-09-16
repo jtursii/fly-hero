@@ -262,6 +262,8 @@ def test_run_ingest_end_to_end(tmp_path):
         "processed_dir": str(processed_dir),
         "sustain_min_beats": 0.5,
         "open_note_exclude_frac": 0.10,
+        "chord_merge_min_gap_s": 1.0 / 60.0,
+        "hit_window_s": 0.07,
         "split": SPLIT_CFG,
     }
 

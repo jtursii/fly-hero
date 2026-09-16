@@ -200,3 +200,17 @@ Song folders considered: **652**
 - val/native_easy_medium/Expert: 28
 - val/native_easy_medium/Hard: 28
 - val/native_easy_medium/Medium: 28
+
+### Chord merges at load time (< 1/60s apart; never applied to the cache), by difficulty across the library (2 total notes absorbed)
+
+- Easy: 0
+- Medium: 0
+- Hard: 0
+- Expert: 2
+
+### Max simultaneously-open hit windows (post-merge, +-hit_window_s), by difficulty -- sets env.py's/RuleEngine's max_open capacity (library-wide max: **8**)
+
+- Easy: 2
+- Medium: 2
+- Hard: 3
+- Expert: 8
