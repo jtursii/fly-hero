@@ -311,33 +311,43 @@ def main() -> None:
         )
         loss = fret_loss + strum_loss
 
-        # The loss itself is essentially never NaN (BCEWithLogitsLoss is
-        # numerically stable for the logit magnitudes this model produces);
-        # the real risk is in backward(): a handful of neuron types in the
-        # early visual pathway (found via a real-run investigation: R7, R8,
-        # L1, L5, plus one 2-neuron type) can produce NaN gradients from
-        # backprop through the 180-substep burn-in+window unroll at this
-        # gain0, even though their forward-pass activations stay finite and
-        # bounded (max|v|~10-11, never inf/nan) -- a gradient-explosion-
-        # through-time effect, not a forward-pass bug. clip_grad_norm_'s
-        # total-norm computation then propagates that NaN into literally
-        # every parameter's gradient (since norm = sqrt(sum of squares)
-        # over ALL params), so checking the returned norm catches it exactly
-        # -- but only if checked *before* optimizer.step(), which an earlier
-        # version of this loop failed to do (it only checked the pre-
-        # backward loss value, so NaN gradients were silently applied,
-        # permanently corrupting the model's Adam state from that step on).
+        # NaN-safe gradient sanitization (user decision, docs/PROGRESS.md's
+        # 2026-09-16 smoke-test entry): backward() through the real
+        # connectome reliably produces NaN gradients for a handful of
+        # shared-per-cell-type parameters (found: R7, R8 photoreceptors, L1,
+        # L5, one 2-neuron type) -- a gradient-explosion-through-time effect
+        # in the 240-substep BPTT unroll, not a forward-pass bug (forward
+        # activity stays bounded throughout). Rather than skip the whole
+        # step (which was previously happening on ~100% of steps, i.e. zero
+        # training progress -- clip_grad_norm_'s combined norm propagates
+        # one NaN parameter into every parameter's effective gradient), NaN/
+        # Inf entries are zeroed in place right after backward(), before
+        # clipping: the ~9,023 unaffected cell types still get a real
+        # update every step; the ~5 affected types simply see no gradient on
+        # a step where their contribution was unstable (equivalent to "no
+        # signal this step" for just those parameters, not a corrupted
+        # update) and stay near their current value until a step where their
+        # gradient happens to be finite.
         is_nan_loss = bool(torch.isnan(loss).item())
         if not is_nan_loss:
             optimizer.zero_grad()
             loss.backward()
+            n_grad_elems, n_bad_elems = 0, 0
+            for p in list(policy.readout_parameters()) + list(policy.non_readout_parameters()):
+                if p.grad is None:
+                    continue
+                bad = ~torch.isfinite(p.grad)
+                n_bad = int(bad.sum().item())
+                if n_bad:
+                    n_bad_elems += n_bad
+                    p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                n_grad_elems += p.grad.numel()
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 list(policy.readout_parameters()) + list(policy.non_readout_parameters()), cfg_bc["grad_clip_norm"],
             )
-            is_nan = bool(torch.isnan(grad_norm).item()) or bool(torch.isinf(grad_norm).item())
-            if not is_nan:
-                optimizer.step()
-            optimizer.zero_grad()  # drop the (possibly NaN) grads either way before the next step
+            optimizer.step()
+            optimizer.zero_grad()
+            is_nan = n_bad_elems > 0  # "step needed sanitization", not "step skipped" -- every step now updates
         else:
             is_nan = True
             grad_norm = torch.tensor(float("nan"))
