@@ -16,7 +16,7 @@ At the start of every session, read `docs/PROGRESS.md` and only the current phas
 5. Train/val/test splits are **by song**. All difficulties of a song live in one split. Evaluation and showcase songs come from the test split.
 6. Controls (shuffled connectome, readout-only) use the identical code path, config, and training budget as the real model.
 7. Never fake, hand-edit, or silently "fix" results, and never weaken, skip, or delete tests. If an acceptance gate fails: stop, record it in PROGRESS.md, propose a fallback from the plan, and ask.
-8. The song library is **read-only**: never write, move, rename, or delete anything in it. Song audio may be copied out of it into `media/` for local use (e.g. muxing into a debug video); `media/` is gitignored, audio is never committed to git, and it never goes under `web/` (Phase 7 still follows D9 unless the user changes it) (D22).
+8. The song library is **read-only**: never write, move, rename, or delete anything in it. Song audio may be copied out of it into `media/` for local use (e.g. muxing into a debug video); `media/` is gitignored, audio is never committed to git, and it never goes under `web/` — **except** the full-mix audio for the 3–5 Phase 7 showcase songs, which this private repo commits under `web/public/audio/` per the user's explicit, revisit-before-public exception (D37). No other audio (stems, non-showcase songs) is ever committed. (D22, D37)
 
 ## Paths
 - Song library: `song_library` in `configs/paths.yaml` (gitignored; created in Phase 0 from the path the user gives).
