@@ -57,6 +57,35 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
 
 ## Log
 <!-- newest first: date — task — outcome — deviations — repro command -->
+- 2026-09-17 (overnight, unattended) — **Decoder threshold sweep, Medium noise check, chord breakdown** (CPU, 4 threads, scratch copies of checkpoints; v2 was not stopped or changed and decoder defaults are unchanged). The val set is `build_val_set(..., ["Medium"], 30, 60 s)`, which yields **28** excerpts (only 28 val songs have Medium ≥ 60 s); its first 10 are the in-training eval set. Score = hits − 0.3·overstrums − misses, summed over the 28 excerpts.
+  - **Sweep @ step 16000** (hit_rate / overstrums per min / score):
+
+    | strum \ fret | 0.3 | 0.5 | 0.7 |
+    |---|---|---|---|
+    | 0.5  | 0.303 / 65.8 / −2675 | **0.421 / 45.5 / −1368** (current) | 0.426 / 43.5 / **−1242** (best in grid) |
+    | 0.7  | 0.254 / 47.7 / −2971 | 0.346 / 32.1 / −1965 | 0.357 / 29.6 / −1804 |
+    | 0.8  | 0.208 / 33.6 / −3276 | 0.273 / 22.6 / −2570 | 0.278 / 21.2 / −2476 |
+    | 0.9  | 0.112 / 13.1 / −3980 | 0.128 / 10.3 / −3801 | 0.121 / 11.0 / −3842 |
+    | 0.95 | 0.033 / 2.6 / −4596 | 0.031 / 2.9 / −4612 | 0.025 / 3.6 / −4660 |
+    | 0.97 | 0.005 / 0.8 / −4820 | 0.004 / 1.0 / −4834 | 0.004 / 1.1 / −4841 |
+
+    The best grid cell (strum 0.5 / fret 0.7) beats the current setting by only +4.5 ± 6.4 score per song (paired; better on 16/28), which is **not a clear win**. **No config change** (and the user asked not to change the defaults). Raising the strum threshold toward the "calibrated" ~0.96 destroys hits: the model's strum peaks mostly sit well below it. Off-grid, lower strum thresholds score better: 0.3/0.5 gives 0.459 / 61.0 / −1140, +8.1 ± 1.8 per song, better on 23/28 (0.3/0.7: −1076, +10.4 ± 6.9). That is a consistent gain in hits at the cost of more overstrums, and a candidate to discuss, not applied.
+  - **Chord breakdown @ 0.5/0.7, step 16000** (Medium has no 3+-note chords in these excerpts). Each missed note is classified by the held set at the strum nearest its time within ±hit_window:
+    - singles: n = 4026, hit_rate 0.434. Misses: 1663 had no strum in the window, 333 nothing held, 156 wrong lane, 125 one extra fret.
+    - 2-note chords, adjacent lanes: n = 783, hit_rate 0.315. Of 536 misses, **379 were missing one fret**, 141 no strum, 10 wrong lane, 6 nothing held.
+    - 2-note chords, non-adjacent: n = 59, hit_rate **0.000**. 43 missing one fret, 7 no strum, 6 nothing held, 3 wrong lane.
+    - Chords almost never fail by an extra fret or wrong lane: the fly holds one of the two frets. Singles fail mostly on strum timing (no strum in the window).
+  - **Noise check @ 0.5/0.5** (28 excerpts, mean ± SE; paired Δ over the same excerpts):
+    - 13000: 0.487 ± 0.029
+    - 14000: 0.536 ± 0.029
+    - 15000: 0.444 ± 0.025
+    - 16000: 0.421 ± 0.030
+    - Paired Δ: 13k→14k **+0.049 ± 0.014**; 14k→15k **−0.092 ± 0.015**; 15k→16k −0.023 ± 0.016; 13k→16k **−0.066 ± 0.023** (up on only 11/28).
+    - **Medium is not flat: it improved, then declined for real, beyond eval noise.** 16000 is significantly worse than the 13000 fork point. This mirrors `bc_full_real`'s 0.45 → 0.35 → 0.41. The in-training 10-song eval shows the same shape (0.516 / 0.438 / 0.452 / 0.476 @ 17000). The watchdog's eval rule never fires, because the largest drop from best was 0.078 < 0.15.
+    - Cross-check: the first 10 excerpts on CPU give 0.440 / 0.518 / 0.430 / 0.440, vs the in-training MPS evals 0.451 / 0.516 / 0.438 / 0.452. A batch-1 CPU rerun of 2 excerpts matched batch 16 to 6e-7, so the ~0.01 gap is CPU vs MPS numerics, not batching.
+  - **v2 overnight event (seen during this check, not caused by it):** a second gradient escalation. The rolling median went 245 (16500) → 432 (16950) → 1620 (17100) → 5686 (17250); max logged norm was 28,804. The D30 clamp fired on 12 of 60 logged steps (16–19 sanitized entries). The skip rule (>20) did not fire. **Watchdog ROLLBACK #1 (sustained_grad_elevation) at step 17385**: it restored `checkpoint_last_healthy.pt` (as certified before the rollback) and halved the brain LR to 5e-5. After that the median was 482 → 789 → 421 by 17850, n_bad back to 15. At ~17900 v2 was still running with 1 rollback, a 0.60% skip rate, and best Medium still 0.516 @ 14000. The 17000 eval took 133 s instead of ~68 s, likely CPU contention from this analysis; all analysis jobs are finished and killed.
+  - **For the morning (not acted on):** (1) Medium has regressed since 14000 in both evals, and a second escalation happened; `checkpoint_best.pt` → step 14000 is the best Medium weights so far. (2) D32's "no problem at step 14000" held only for that checkpoint: the pathway escalated again ~3k steps later and was caught by the watchdog, not prevented. (3) The eval-drop rule (0.15) is too loose to catch this regression. (4) Decoder: nothing in the requested grid is a clear win; a strum threshold of 0.3 is a consistent small gain.
+  - Repro: ad hoc scratch scripts (`cache_probs.py`: build_policy on CPU + `run_clip` no-grad, batch 16, same clip construction as `score_eval_entry`, saves sigmoid probs; `analyze.py`: re-decodes cached probs with the thresholds and scores with `rules.score_playthrough`).
 - 2026-09-16 — **Plan change D34: shuffled-connectome control deferred until after the demo site ships** — priority is now the real brain toward Hard (v2, running and untouched), then Phases 6–7. Phase 5 results for now: real vs GRU vs readout-only. PLAN.md updated (plan-change note, Phase 4 task 4, Phase 5 task 1 + G5, Phase 7 follow-up, day table). Added `graph_file` to `configs/brain.yaml` (default `graph.npz`, so behavior is unchanged) so the control can differ by config alone; before this, `graph.npz` was hard-coded. New test: the shuffled graph differs from the real one only in `post`. Reproduction is pinned in D34: git tag `control-repro-d34` = commit `c7639385663bf888abfb2907aa6ff02d631d69e6`, config md5s, the command, and three asymmetries to resolve or report (D30 active from step 0 in the control; stale `pair_id` gain grouping in the shuffled graph; watchdog). `uv run pytest -q`: 92 passed.
 - 2026-09-16 — **fly.sh: total-compute-only display, crash guard; overnight checks** (v2 untouched, running) —
   - `fly.sh check` now shows a single `total compute: Xh Ym` line (`scripts/training_time.py --total-only`; breakdown code kept).
@@ -234,6 +263,7 @@ Phase 3 (baseline_gru.py, bc.py, training runs) in a future session.
   - Repro: `uv run pytest -q`; `uv run python -m flyhero.library.scan --config configs/paths.yaml` → `docs/library_report.md`.
 
 ## Open issues
+- **Medium regression in v2 (2026-09-17)**: paired 28-excerpt val hit_rate 0.536 @ 14000 → 0.421 @ 16000 (−0.066 ± 0.023 vs the 13000 fork point), plus a second gradient escalation → watchdog rollback #1 @ 17385 (brain LR now 5e-5). Needs a user decision (e.g. continue, fall back to `checkpoint_best.pt` = 14000, tighten the eval rule). See the 2026-09-17 log entry.
 - Deferred (D34): `bc_full_shuffled` control, after Phase 7. Before running, decide D34's asymmetries (2) `pair_id` grouping and (1) pre-D30 steps.
 - ~~Offline NaN root-cause diagnosis not done~~ -- **Resolved** (D30): the R7/R8/L1/L5/`AN_multi_1` pathway passes through a finite-but-astronomically-large gradient regime (1e5-1e14+) before overflowing, reaching `inf` within as few as 60 BPTT frames on a real Medium clip. Fixed with an element-wise magnitude clamp + per-parameter-group clipping (see this session's log entry). float64 vs float32 and the exact per-substep growth curve weren't separately characterized (the finite-regime evidence alone was sufficient to design and validate a fix) -- truncated BPTT and re-opening D25's gain0/bias_init choice remain on the table as deeper interventions if the current fix's residual instability (the same 5 types still don't reliably learn) turns out to matter in Phase 5's `docs/results.md`.
 - ~~STOPPED (invariant 7): 100% gradient-NaN rate training the real connectome brain~~ -- **Resolved**: user chose NaN-safe gradient sanitization (zero NaN/Inf grad entries after `backward()`, before clipping, so unaffected cell types still update every step). Re-verified with a fresh smoke test: loss fell 2.1->1.5 over 70 steps, `grad_norm` finite, `max|v|` stayed bounded (~11.4-11.5), no crash. `bc_full_real` launched. The ~5 affected cell types (R7, R8, L1, L5, one 2-neuron type) will never receive a real gradient under this fix and stay near their initial `tau`/`bias`/`g` values -- worth reviewing in `docs/results.md` (Phase 5) whether that measurably limits final performance; truncated-BPTT and re-opening D25's gain0/bias_init choice remain on the table as follow-ups if so.
