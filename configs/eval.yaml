@@ -1,0 +1,9 @@
+# eval/evaluate.py (PLAN Phase 4 task 3, Gate G4). Model/game configs come
+# from the checkpoint's own run dir (its brain.yaml/game.yaml copies).
+processed_dir: "data/processed"
+split: test
+difficulties: ["Easy", "Medium", "Hard", "Expert"]
+batch_size: 8
+pre_roll_s: 1.0   # blank lead-in = training/eval burn_in_s (configs/bc.yaml)
+post_roll_s: 1.0  # past the last note's end, so its hit window closes
+seed: 0
