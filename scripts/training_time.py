@@ -100,6 +100,7 @@ def main() -> None:
     p.add_argument("run_dir")
     p.add_argument("--runs-root", default="runs")
     p.add_argument("--max-gap-s", type=float, default=300.0)
+    p.add_argument("--total-only", action="store_true", help="print just 'total compute: Xh Ym'")
     args = p.parse_args()
     runs_root, run_dir = Path(args.runs_root), Path(args.run_dir)
 
@@ -130,6 +131,10 @@ def main() -> None:
             note = ""
         rows.append((name, secs, note))
 
+    if args.total_only:
+        h, m = divmod(int(round(total / 60)), 60)
+        print(f"total compute: {h}h {m}m")
+        return
     chain = " -> ".join(RUN_DIR_RE.match(d.name).group(1) + (f"<={s}" if s is not None else "")
                         for d, s in reversed(lineage))
     print(f"lineage training time: {fmt(lineage_total)}  ({chain})")

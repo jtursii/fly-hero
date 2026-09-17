@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fly Brain Hero — training controls. Run from the project folder.
-# Usage: ./fly.sh [check|awake|stop|resume|video|log]
+# Usage: ./fly.sh [check|awake|stop|resume|guard|video|log]
 set -uo pipefail
 
 # Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real
@@ -81,8 +81,7 @@ case "${1:-}" in
     LATEST=$(ls -t "$RUN" 2>/dev/null | head -n 1)
     [ -n "$LATEST" ] && echo "last file written: $LATEST ($(( ($(date +%s) - $(stat -f %m "$RUN/$LATEST")) / 60 )) min ago)"
     scripts/status.sh "$RUN"
-    echo "--- training time (active; gaps > 5 min not counted) ---"
-    uv run --quiet python scripts/training_time.py "$RUN" 2>/dev/null || echo "(training time unavailable)"
+    uv run --quiet python scripts/training_time.py "$RUN" --total-only 2>/dev/null || echo "total compute: unavailable"
 
     if [ -L "$RUN/checkpoint_latest.pt" ]; then
       CKPT_TARGET="$RUN/$(readlink "$RUN/checkpoint_latest.pt")"
@@ -160,6 +159,8 @@ if rollbacks:
     require_run
     PID=$(find_pid)
     [ -z "$PID" ] && { echo "Nothing running."; exit 0; }
+    # Tells `fly.sh guard` this stop was deliberate (cleared by resume).
+    echo "stopped via fly.sh stop at $(date '+%Y-%m-%dT%H:%M:%S')" > "$RUN/STOPPED_BY_USER"
     kill -TERM "$PID" && echo "SIGTERM sent to $PID (the python process, not the uv wrapper). Waiting for checkpoint..."
     for i in $(seq 1 60); do
       [ -z "$(find_pid)" ] && { echo "✅ Stopped cleanly."; exit 0; }
@@ -183,6 +184,7 @@ if rollbacks:
       *"--resume latest --run-dir $RUN "*) ;;
       *) echo "Refusing: resume command is not '--resume latest --run-dir $RUN': $CMD"; exit 1 ;;
     esac
+    rm -f "$RUN/STOPPED_BY_USER"
     EXPECT_STEP=$(ckpt_step)
     echo "Running: $CMD"
     echo "Expecting to resume at step $EXPECT_STEP (checkpoint_latest.pt)"
@@ -208,6 +210,60 @@ if rollbacks:
       echo "Paste this output to Claude."
     fi
     ;;
+  guard)
+    # Crash auto-resume. Run in its own terminal window: ./fly.sh guard
+    # Every GUARD_INTERVAL s (default 60): if RUN's training process is gone
+    # and there is no STOPPED.txt / STOPPED_BY_USER, run `fly.sh resume` and
+    # log it to $RUN/guard.log. At most GUARD_MAX (default 3) auto-resumes
+    # per night (logged in the last 12 h). Exits on STOPPED.txt,
+    # STOPPED_BY_USER, or the cap. --dry-run: only prints what it would do
+    # (never resumes, never writes guard.log). --once: one check, then exit.
+    require_run
+    shift
+    DRY=0; ONCE=0
+    for a in "$@"; do
+      case "$a" in
+        --dry-run) DRY=1 ;;
+        --once) ONCE=1 ;;
+        *) echo "unknown guard option: $a"; exit 1 ;;
+      esac
+    done
+    INTERVAL="${GUARD_INTERVAL:-60}"; MAX="${GUARD_MAX:-3}"
+    GLOG="$RUN/guard.log"
+    glog() {  # epoch first, so the per-night count can filter by time
+      local line="$(date +%s) $(date '+%Y-%m-%dT%H:%M:%S') $*"
+      if [ "$DRY" = 1 ]; then echo "[dry-run] would log to $GLOG: $line"; else echo "$line" >> "$GLOG"; echo "$line"; fi
+    }
+    echo "Guarding $RUN every ${INTERVAL}s (max $MAX auto-resumes/night)$([ "$DRY" = 1 ] && echo ' [DRY RUN]'). Ctrl+C to stop guarding."
+    [ "$DRY" = 1 ] || glog "guard started (pid $$)"
+    while true; do
+      if [ -f "$RUN/STOPPED.txt" ]; then
+        glog "STOPPED.txt present ($(head -n1 "$RUN/STOPPED.txt")) -- guard exiting"; exit 0
+      fi
+      if [ -f "$RUN/STOPPED_BY_USER" ]; then
+        glog "STOPPED_BY_USER present -- guard exiting"; exit 0
+      fi
+      PID=$(find_pid)
+      if [ -n "$PID" ]; then
+        echo "$(date '+%H:%M:%S') running (pid $PID)$([ "$DRY" = 1 ] && echo ' -- [dry-run] would do nothing')"
+      else
+        SINCE=$(( $(date +%s) - 43200 ))
+        N=$(awk -v s="$SINCE" '$1 >= s && /AUTO-RESUME #/' "$GLOG" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$N" -ge "$MAX" ]; then
+          glog "process gone, but $N auto-resumes already in the last 12h (max $MAX) -- guard exiting"; exit 1
+        fi
+        glog "AUTO-RESUME #$((N + 1)): process gone, no STOPPED.txt/STOPPED_BY_USER -- running fly.sh resume"
+        if [ "$DRY" = 1 ]; then
+          echo "[dry-run] would run: RUN=$RUN $0 resume"
+        else
+          OUT=$(RUN="$RUN" "$0" resume 2>&1); RC=$?
+          glog "resume exit=$RC: $(echo "$OUT" | grep -E '✅|❌' | head -n1)"
+        fi
+      fi
+      [ "$ONCE" = 1 ] && exit 0
+      sleep "$INTERVAL"
+    done
+    ;;
   video)
     shift
     PYTHONPATH=. uv run python scripts/render_gameplay_video.py --run "$RUN" "$@"
@@ -221,6 +277,7 @@ if rollbacks:
     echo "./fly.sh awake           → keep Mac awake (leave window open)"
     echo "./fly.sh stop            → stop cleanly (SIGTERM, saves checkpoint)"
     echo "./fly.sh resume          → resume from the latest checkpoint (refuses if already running)"
+    echo "./fly.sh guard [--dry-run] → auto-resume after a crash (own terminal window; max 3/night)"
     echo "./fly.sh video [song] [difficulty] → render a gameplay video at the current checkpoint's skill"
     echo "./fly.sh log             → last lines of the resume log"
     echo ""
