@@ -1,4 +1,9 @@
 processed_dir: "data/processed"
+# D34: which wiring the brain uses. "graph.npz" = real connectome;
+# "graph_shuffled.npz" = the deferred shuffled-connectome control (the only
+# config difference allowed between the two runs, invariant 6). The retina's
+# photoreceptor map always comes from graph.npz (identical node arrays in both).
+graph_file: "graph.npz"
 
 # Euler integration, 2 substeps per 60Hz game frame (PLAN Phase 3 task 1).
 dt: 0.008333333  # 1/120

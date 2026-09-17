@@ -6,6 +6,8 @@
 - In: song library ingest → connectome graph → simulator → brain → behavior cloning → one control → export → site.
 - Out: PPO, the real Clone Hero game, spiking models, BANC, extensive ablations. ES fine-tuning is a stretch goal only.
 
+**Plan change (2026-09-16, D34):** the shuffled-connectome control (`bc_full_shuffled`) is **deferred until after the demo site ships**. Current priority: (1) train the real brain toward Hard (`bc_full_real_v2`), (2) Phases 6–7. Phase 5's `docs/results.md` compares real brain vs GRU vs readout-only for now; the shuffled row is added when the control runs (setup pinned in D34).
+
 **Time-critical path:** overnight training on Day 3 → 4 and Day 4 → 5. If earlier phases slip, cut features, not overnight runs.
 
 Each phase has tasks, an acceptance **gate** (numbers go in PROGRESS.md), and **fallbacks**. Don't start the next phase until the gate passes or the user approves a fallback.
@@ -213,7 +215,7 @@ If the GRU fails G3, fix labels, rules, or the loop before touching the brain.
 1. Review `bc_readout_only`. Record val `hit_rate` per difficulty.
 2. Train the full model (readout + `tau` + `b` + `g`), initialized from the readout-only checkpoint. Run in the background; monitor via `scripts/status.sh`.
 3. Write `eval/evaluate.py`: runs a checkpoint on **all test-split songs** at every difficulty and writes `eval.json` with per-song and aggregate metrics.
-4. **Evening:** launch the overnight runs `bc_full_real` (best config) and `bc_full_shuffled` (identical config, `graph_shuffled.npz`). Run them sequentially if memory is tight.
+4. **Evening:** launch the overnight runs `bc_full_real` (best config) and `bc_full_shuffled` (identical config, `graph_shuffled.npz`). Run them sequentially if memory is tight. **D34: `bc_full_shuffled` deferred until after Phase 7** — run it later with the pinned setup in DECISIONS.md D34 (only change: `graph_file: "graph_shuffled.npz"` in `configs/brain.yaml`).
 
 **Gate G4:** full real model has test `hit_rate` ≥ 0.70 on Medium by Day 5 morning.
 
@@ -230,7 +232,7 @@ If the gate still fails, showcase at Easy and document it honestly.
 
 ## Phase 5 — Evaluate + control + stretch (Day 5)
 **Tasks**
-1. Run `evaluate.py` on readout-only, full real, full shuffled, and the GRU baseline. Write `docs/results.md` with a table (test `hit_rate` and overstrums/min per difficulty) plus two sentences of honest interpretation.
+1. Run `evaluate.py` on readout-only, full real, and the GRU baseline (D34: full shuffled deferred; add its row after Phase 7). Write `docs/results.md` with a table (test `hit_rate` and overstrums/min per difficulty) plus two sentences of honest interpretation.
 2. Choose 3 **test-split** showcase songs (never trained on) at the highest difficulty where the model's `hit_rate` ≥ 0.70. Prefer songs the user likes and that are ≤ 4 min. **The user picks the final set.**
 3. **Stretch (only if on schedule): ES fine-tune** in `train/es.py`.
    - Mirrored-sampling OpenAI-ES over brain parameters + readout. Population 32, σ = 0.02.
@@ -238,7 +240,7 @@ If the gate still fails, showcase at Easy and document it honestly.
    - Fitness = full-song score from `rules.py` on train songs.
    - Time-box to 4 h. Keep the result only if test `hit_rate` improves.
 
-**Gate G5:** `docs/results.md` has all four rows; showcase songs are recorded in PROGRESS.md.
+**Gate G5:** `docs/results.md` has the real / GRU / readout-only rows (the shuffled row follows after Phase 7, D34); showcase songs are recorded in PROGRESS.md.
 
 ---
 
@@ -274,6 +276,8 @@ If the gate still fails, showcase at Easy and document it honestly.
 ---
 
 ## Phase 7 — three.js site + deploy (Day 7)
+**After Phase 7 ships (D34):** run the deferred `bc_full_shuffled` control with the pinned setup, add its row to `docs/results.md`.
+
 **Before starting:** confirm D9 with the user.
 
 **Tasks**
@@ -322,7 +326,7 @@ If the gate still fails, showcase at Easy and document it honestly.
 | 1 | 0, 1 | — |
 | 2 | 2 | (optional) full library ingest if slow |
 | 3 | 3 | `bc_readout_only` |
-| 4 | 4 | `bc_full_real` + `bc_full_shuffled` |
+| 4 | 4 | `bc_full_real` (`bc_full_shuffled` deferred until after Day 7, D34) |
 | 5 | 5 (+ ES stretch) | — |
 | 6 | 6 | — |
 | 7 | 7 | — |

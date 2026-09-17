@@ -107,7 +107,7 @@ def build_policy(model_kind: str, cfg_bc: dict, cfg_game: dict, cfg_brain: dict,
         model = GRUBaseline(frame_size=cfg_game["frame_size"]).to(device=device, dtype=dtype)
         return model
 
-    graph, meta = load_graph_and_meta(cfg_brain["processed_dir"])
+    graph, meta = load_graph_and_meta(cfg_brain["processed_dir"], cfg_brain.get("graph_file", "graph.npz"))
     brain = ConnectomeBrain(graph, cfg_brain, device=device, dtype=dtype)
     readout = Readout(brain.n_dn, cfg_brain["readout"]["n_actions"]).to(device=device, dtype=dtype)
     retina_cfg = cfg_game["retina"]

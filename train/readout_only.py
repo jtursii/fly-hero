@@ -243,7 +243,7 @@ def main() -> None:
     torch.manual_seed(seed)
 
     processed_dir = Path(cfg_bc["processed_dir"])
-    graph, meta = load_graph_and_meta(cfg_brain["processed_dir"])
+    graph, meta = load_graph_and_meta(cfg_brain["processed_dir"], cfg_brain.get("graph_file", "graph.npz"))
     photo_map = build_photoreceptor_map(dict(np.load(processed_dir / "graph.npz")), meta["type_names"])
     env = VecRhythmEnv(cfg_game, photo_map)
 

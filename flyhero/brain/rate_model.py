@@ -36,9 +36,12 @@ def softplus_inverse(y: float) -> float:
     return math.log(math.expm1(y))
 
 
-def load_graph_and_meta(processed_dir: str | Path) -> tuple[dict, dict]:
+def load_graph_and_meta(processed_dir: str | Path, graph_file: str = "graph.npz") -> tuple[dict, dict]:
+    """graph_file: "graph.npz" (real) or "graph_shuffled.npz" (the
+    degree-preserving shuffled control, D34). The shuffle only permutes
+    `post`, so graph_meta.json and every node array apply to both."""
     processed_dir = Path(processed_dir)
-    graph = dict(np.load(processed_dir / "graph.npz"))
+    graph = dict(np.load(processed_dir / graph_file))
     meta = json.loads((processed_dir / "graph_meta.json").read_text())
     return graph, meta
 

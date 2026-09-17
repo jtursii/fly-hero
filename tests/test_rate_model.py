@@ -286,3 +286,20 @@ def test_gradcheck_float64_cpu():
         return v[:, brain.dn_idx].sum()
 
     assert torch.autograd.gradcheck(loss_fn, (tau, bias, g, i_photo), eps=1e-6, atol=1e-4)
+
+
+def test_load_graph_and_meta_graph_file_switch():
+    """D34: graph_file selects real vs shuffled wiring; the shuffle only
+    permutes `post`, so every other array must be identical."""
+    from flyhero.brain.rate_model import load_graph_and_meta
+
+    pd = Path("data/processed")
+    if not (pd / "graph.npz").exists() or not (pd / "graph_shuffled.npz").exists():
+        pytest.skip("processed graphs not built")
+    real, meta = load_graph_and_meta(pd)
+    shuf, meta_s = load_graph_and_meta(pd, "graph_shuffled.npz")
+    assert meta == meta_s and real.keys() == shuf.keys()
+    assert not np.array_equal(real["post"], shuf["post"])
+    for k in real:
+        if k != "post":
+            assert np.array_equal(real[k], shuf[k]), k
