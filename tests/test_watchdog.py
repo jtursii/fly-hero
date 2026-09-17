@@ -8,11 +8,14 @@ their logic.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import torch
 
 from train.bc import apply_gradient_step, perform_rollback, write_stopped_file
 from train.common import save_checkpoint
-from train.watchdog import GradWatchdog
+from train.watchdog import GradWatchdog, baseline_from_metrics, load_metrics_lineage, replay_on_metrics
 
 # ---------------------------------------------------------------------------
 # Pure logic (no model, no I/O)
@@ -90,32 +93,94 @@ def test_transient_elevation_does_not_accumulate_across_a_recovery():
 
 
 def test_is_healthy_now_hysteresis():
-    wd = GradWatchdog(window=5, rollback_median_ratio=5.0, healthy_ratio=2.0)
+    wd = GradWatchdog(window=5, healthy_window=10, rollback_median_ratio=5.0, healthy_ratio=2.0)
     assert wd.is_healthy_now()  # no baseline yet -- earliest checkpoints are trusted
     _fill_baseline(wd, value=10.0)
-    assert wd.is_healthy_now()
-    # push the window to 3x baseline: above healthy_ratio(2x), below rollback(5x)
+    assert not wd.is_healthy_now()  # baseline set, but the 10-step window isn't full yet
     for _ in range(5):
+        wd.record_step(10.0, n_bad_elems=0)
+    assert wd.is_healthy_now()
+    # push the long window to 3x baseline: above healthy_ratio(2x), below rollback(5x)
+    for _ in range(10):
         wd.record_step(30.0, n_bad_elems=0)
     assert not wd.is_healthy_now()
     assert not wd.should_rollback_from_steps()
 
 
-def test_eval_drop_triggers_rollback_after_two_consecutive():
-    wd = GradWatchdog(rollback_eval_drop=0.15, rollback_eval_consecutive=2)
-    assert wd.record_eval("Medium", 0.80) is False  # first eval is the new best
-    assert wd.record_eval("Medium", 0.90) is False  # improves further
-    assert wd.record_eval("Medium", 0.70) is False  # drop 1 (0.20 > 0.15)
-    assert wd.record_eval("Medium", 0.72) is True  # drop 2, consecutive -> rollback
-    assert wd.best_hit_rate["Medium"] == 0.90
+def test_healthy_needs_the_long_window_not_just_the_rolling_median():
+    # D35 / v2 step 42000: the 200-step median had dipped back under 2x
+    # baseline, but the preceding 1000 steps were a bad stretch.
+    wd = GradWatchdog(window=5, healthy_window=20, baseline_grad_norm=10.0, rollback_median_ratio=3.0)
+    for _ in range(15):
+        wd.record_step(80.0, n_bad_elems=0)
+    for _ in range(5):
+        wd.record_step(12.0, n_bad_elems=0)
+    assert wd.rolling_median() < 2 * 10.0
+    assert wd.long_median() >= 2 * 10.0
+    assert not wd.is_healthy_now()
 
 
-def test_eval_recovery_resets_consecutive_bad_count():
-    wd = GradWatchdog(rollback_eval_drop=0.15, rollback_eval_consecutive=2)
-    wd.record_eval("Easy", 0.90)
-    wd.record_eval("Easy", 0.70)  # drop 1
-    wd.record_eval("Easy", 0.85)  # recovers (within 0.15 of best) -> resets
-    assert wd.record_eval("Easy", 0.70) is False  # drop 1 again, not 2 consecutive
+def test_not_healthy_while_rolling_median_is_above_trigger():
+    # v2 step 40000: the escalation had just started, so the 1000-step median
+    # was still low while the 200-step median was already above 3x baseline.
+    wd = GradWatchdog(window=5, healthy_window=20, baseline_grad_norm=10.0, rollback_median_ratio=3.0)
+    for _ in range(17):
+        wd.record_step(10.0, n_bad_elems=0)
+    for _ in range(3):
+        wd.record_step(50.0, n_bad_elems=0)
+    assert wd.long_median() < 2 * 10.0
+    assert wd.rolling_median() > 3 * 10.0
+    assert not wd.is_healthy_now()
+
+
+def test_default_trigger_is_3x_for_200_steps():
+    wd = GradWatchdog(baseline_grad_norm=100.0)
+    assert (wd.rollback_median_ratio, wd.rollback_consecutive_steps, wd.healthy_window) == (3.0, 200, 1000)
+    for _ in range(200):
+        wd.record_step(100.0, n_bad_elems=0)
+    # 2.9x never fires
+    for _ in range(1000):
+        wd.record_step(290.0, n_bad_elems=0)
+        assert not wd.should_rollback_from_steps()
+    # 3.5x: the rolling median (avg of the two middle entries) crosses 3x once
+    # 100 of the 200 entries are elevated (step 100), then must stay there for
+    # 200 consecutive steps (steps 100..299).
+    n = 0
+    while not wd.should_rollback_from_steps():
+        wd.record_step(350.0, n_bad_elems=0)
+        n += 1
+        assert n < 1000
+    assert n == 299
+
+
+def test_eval_ma_drop_triggers_rollback():
+    wd = GradWatchdog(eval_ma_window=3, rollback_eval_drop=0.08)
+    for hr in (0.70, 0.72, 0.74):  # MA 0.72 = best
+        assert wd.record_eval("Medium", hr) is False
+    assert wd.best_eval_ma["Medium"] == pytest.approx(0.72)
+    assert wd.record_eval("Medium", 0.60) is False  # MA 0.687, drop 0.033
+    assert wd.record_eval("Medium", 0.62) is False  # MA 0.653, drop 0.067
+    assert wd.record_eval("Medium", 0.55) is True  # MA 0.59, drop 0.13 > 0.08
+    assert wd.best_hit_rate["Medium"] == 0.74
+
+
+def test_single_bad_eval_does_not_trigger():
+    # a one-off 0.2 dip (like v2's 0.635 at 41000 between 0.718 and 0.732)
+    # moves a 3-eval MA by only ~0.067.
+    wd = GradWatchdog(eval_ma_window=3, rollback_eval_drop=0.08)
+    for hr in (0.72, 0.72, 0.72, 0.52, 0.72, 0.72):
+        assert wd.record_eval("Easy", hr) is False
+
+
+def test_eval_ma_waits_for_a_full_window_and_is_per_difficulty():
+    wd = GradWatchdog(eval_ma_window=3)
+    wd.record_eval("Easy", 0.9)
+    wd.record_eval("Easy", 0.9)
+    assert wd.eval_ma("Easy") is None
+    wd.record_eval("Medium", 0.1)
+    wd.record_eval("Easy", 0.6)
+    assert wd.eval_ma("Easy") == pytest.approx(0.8)
+    assert wd.eval_ma("Medium") is None
 
 
 def test_max_rollbacks_exhaustion():
@@ -127,14 +192,81 @@ def test_max_rollbacks_exhaustion():
     assert wd.exhausted()
 
 
-def test_note_rollback_resets_baseline_and_window():
+def test_note_rollback_keeps_frozen_baseline_and_clears_windows():
+    # D35: re-measuring the baseline right after a rollback (old behavior)
+    # captured a still-turbulent median in v2 (~740 vs ~340 healthy).
     wd = GradWatchdog(window=5)
     _fill_baseline(wd, value=10.0)
+    for hr in (0.5, 0.6, 0.7):
+        wd.record_eval("Medium", hr)
     wd.consecutive_bad_steps = 4
     wd.note_rollback()
-    assert wd.healthy_baseline is None
+    assert wd.healthy_baseline == 10.0
     assert wd.consecutive_bad_steps == 0
-    assert wd.rolling_median() is None
+    assert wd.rolling_median() is None and wd.long_median() is None
+    assert wd.eval_ma("Medium") is None
+    assert wd.best_eval_ma["Medium"] == pytest.approx(0.6)
+    # a turbulent post-rollback window does not move the baseline
+    for _ in range(10):
+        wd.record_step(74.0, n_bad_elems=0)
+    assert wd.healthy_baseline == 10.0
+
+
+def test_configured_baseline_is_used_immediately_and_wins_over_saved_state():
+    wd = GradWatchdog(window=5, baseline_grad_norm=339.4)
+    assert wd.healthy_baseline == 339.4
+    for _ in range(5):
+        wd.record_step(900.0, n_bad_elems=0)
+    assert wd.healthy_baseline == 339.4  # first full window doesn't overwrite it
+    other = GradWatchdog(window=5)
+    _fill_baseline(other, value=740.0)
+    wd.load_state_dict(other.state_dict())
+    assert wd.healthy_baseline == 339.4
+    unconfigured = GradWatchdog(window=5)
+    unconfigured.load_state_dict(other.state_dict())
+    assert unconfigured.healthy_baseline == 740.0
+
+
+# ---------------------------------------------------------------------------
+# D35: replay on bc_full_real_v2's real metrics (steps 37000-42300, trimmed
+# fields; tests/fixtures/v2_metrics_37k_42k.jsonl). The 40k-41.8k escalation
+# was not caught by the old rules.
+# ---------------------------------------------------------------------------
+
+V2_FIXTURE = Path(__file__).parent / "fixtures" / "v2_metrics_37k_42k.jsonl"
+V2_BASELINE = 339.4  # median logged grad_norm over v2 steps 18000-39000 (configs/bc_full_real_v2.yaml)
+
+
+def test_old_rules_miss_the_v2_40k_episode():
+    records = load_metrics_lineage(V2_FIXTURE)
+    # old: 5x a baseline re-measured after the 17385 rollback (~740), 300 steps.
+    # The run's own logged 200-step median never stays above 3700 that long.
+    old = replay_on_metrics(records, 740.0, rollback_median_ratio=5.0, rollback_consecutive_steps=300)
+    assert old["live_median_fires"] == []
+
+
+def test_fixed_rules_fire_on_the_v2_40k_episode():
+    records = load_metrics_lineage(V2_FIXTURE)
+    out = replay_on_metrics(records, V2_BASELINE)
+    # true 200-step median (as logged live): fires ~40040, nothing earlier
+    assert out["live_median_fires"] and 40000 <= out["live_median_fires"][0] <= 40100
+    # the real GradWatchdog on 1-in-10 samples agrees within ~200 steps
+    assert out["grad_fires"] and 39800 <= out["grad_fires"][0] <= 40100
+    assert all(s >= 39800 for s in out["grad_fires"])
+    # rollback target: 39500 is the last certified checkpoint; 40000-42000 are not
+    assert out["healthy"][39000] and out["healthy"][39500]
+    assert not any(out["healthy"][s] for s in (40000, 40500, 41000, 41500, 42000))
+    # the eval-MA rule does not fire here (largest MA drop is 0.07 < 0.08)
+    assert out["eval_fires"] == []
+
+
+def test_baseline_from_metrics_excludes_skips_and_span_edges():
+    records = [
+        dict(step=10, loss=0.1, grad_norm=1.0), dict(step=20, loss=0.1, grad_norm=3.0),
+        dict(step=30, loss=0.1, grad_norm=1e6, skip=True), dict(step=40, loss=0.1, grad_norm=5.0),
+        dict(step=50, loss=0.1, grad_norm=1e6),
+    ]
+    assert baseline_from_metrics(records, 10, 40) == 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +398,9 @@ def test_state_dict_round_trip_through_checkpoint(tmp_path):
     _fill_baseline(wd, value=100.0)
     wd.record_step(3000.0, n_bad_elems=0)  # skip
     wd.record_eval("Medium", 0.52)
-    wd.record_eval("Medium", 0.30)  # one bad eval pending
+    wd.record_eval("Medium", 0.30)
     wd.note_rollback()
+    wd.record_eval("Medium", 0.40)
     for v in (90.0, 110.0):
         wd.record_step(v, n_bad_elems=0)
 
@@ -303,8 +436,33 @@ def test_reconstruct_from_metrics_respects_step_bound(tmp_path):
     p = tmp_path / "metrics.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in lines) + "\nnot json\n")
     rec = reconstruct_from_metrics(p, up_to_step=2999)
-    assert rec == dict(best_hit_rate={"Easy": 0.8, "Medium": 0.45}, rollback_count=1)
-    assert reconstruct_from_metrics(tmp_path / "missing.jsonl", 10) == dict(best_hit_rate={}, rollback_count=0)
+    assert rec["best_hit_rate"] == {"Easy": 0.8, "Medium": 0.45}
+    assert rec["rollback_count"] == 1
+    assert rec["eval_history"] == {"Easy": [], "Medium": []}  # a rollback clears every difficulty's recent evals
+    empty = reconstruct_from_metrics(tmp_path / "missing.jsonl", 10)
+    assert empty == dict(best_hit_rate={}, rollback_count=0, eval_history={}, best_eval_ma={})
+
+
+def test_reconstruct_rebuilds_eval_ma_and_drops_abandoned_branch(tmp_path):
+    import json
+
+    from train.watchdog import reconstruct_from_metrics
+
+    lines = [
+        dict(step=1000, eval_difficulty="Medium", eval_hit_rate=0.70),
+        dict(step=2000, eval_difficulty="Medium", eval_hit_rate=0.60),
+        dict(step=3000, eval_difficulty="Medium", eval_hit_rate=0.80),
+        dict(step=3010, loss=1.0, grad_norm=5.0),
+        dict(step=4000, eval_difficulty="Medium", eval_hit_rate=0.10),  # abandoned branch
+        dict(step=3000, resumed_from_step=3000),
+        dict(step=4000, eval_difficulty="Medium", eval_hit_rate=0.75),
+    ]
+    p = tmp_path / "metrics.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in lines) + "\n")
+    assert [r["step"] for r in load_metrics_lineage(p)] == [1000, 2000, 3000, 3000, 4000]
+    rec = reconstruct_from_metrics(p, up_to_step=4000)
+    assert rec["eval_history"] == {"Medium": [0.60, 0.80, 0.75]}
+    assert rec["best_eval_ma"]["Medium"] == pytest.approx(0.7166666, abs=1e-6)
 
 
 def test_existing_run_dirs_matches_exact_name_only(tmp_path):

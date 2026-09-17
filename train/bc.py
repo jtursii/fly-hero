@@ -8,15 +8,18 @@ Burn-in (no_grad) then a gradient window, BCE loss on frets + strum
 guess), AdamW with separate LRs for readout vs. brain/CNN+GRU params,
 grad-clip, optional per-frame gradient checkpointing (D26), periodic val
 eval on a fixed note-dense excerpt per val song, curriculum advancement
-(Easy->Medium->Hard->Expert at val hit_rate>=0.8, 20% of clips from earlier
-difficulties once advanced), and resumability (--resume, checkpoint every N
-steps or M seconds, plus on SIGTERM).
+(Easy->Medium->Hard->Expert when the 3-eval moving average of val hit_rate
+reaches advance_hit_rate (D36), 20% of clips from earlier difficulties once
+advanced), an optional cosine LR decay (D36), and resumability (--resume,
+checkpoint every N steps or M seconds, plus on SIGTERM).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -38,9 +41,9 @@ from flyhero.game.retina_torch import TorchRetina
 from flyhero.game.rules import score_playthrough
 from flyhero.game.sim import VecRhythmEnv
 from flyhero.utils.config import load_config
-from flyhero.utils.run import make_run_dir
+from flyhero.utils.run import git_sha, make_run_dir
 from train.common import build_eval_clip, build_val_set, estimate_strum_pos_weight, make_training_clip
-from train.watchdog import GradWatchdog, reconstruct_from_metrics
+from train.watchdog import GradWatchdog, load_metrics_lineage, reconstruct_from_metrics
 
 _stop_requested = False
 _stop_signal_name: str | None = None
@@ -54,17 +57,20 @@ def _handle_stop_signal(signum, frame) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--config", default="configs/bc.yaml")
+    p.add_argument(
+        "--config", default=None,
+        help="default: on --resume, the config recorded in <run-dir>/train_config.txt (else configs/bc.yaml)",
+    )
     p.add_argument("--game-config", default="configs/game.yaml")
     p.add_argument("--brain-config", default="configs/brain.yaml")
     p.add_argument("--model", choices=["connectome", "gru"], default="connectome")
     p.add_argument("--run-name", default=None)
     p.add_argument(
         "--resume", default=None,
-        help="a checkpoint file path, or the literal 'latest' combined with --run-dir to resolve "
-        "<run-dir>/checkpoint_latest.pt",
+        help="a checkpoint file path, or the literal 'latest' / 'best' combined with --run-dir to resolve "
+        "<run-dir>/checkpoint_latest.pt / checkpoint_best.pt",
     )
-    p.add_argument("--run-dir", default=None, help="required when --resume latest is used")
+    p.add_argument("--run-dir", default=None, help="required with --resume latest/best")
     p.add_argument(
         "--init-from", default=None,
         help="seed model/optimizer/step/difficulty/pos_weight from this checkpoint file, but start a "
@@ -77,6 +83,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--max-time-s", type=float, default=None)
     p.add_argument("--fixed-difficulty", default=None, help="disable curriculum, train/eval only this difficulty")
+    p.add_argument(
+        "--set-lr-brain", type=float, default=None,
+        help="ONE-SHOT, with --resume: replace the brain group's base LR (the value the LR schedule scales and "
+        "rollbacks halve). Saved in the optimizer state, so don't repeat it on later resumes.",
+    )
     p.add_argument("--gradient-checkpointing", action="store_true", default=None)
     p.add_argument(
         "--debug-inject-rollback-at-step", type=int, default=None,
@@ -84,13 +95,45 @@ def parse_args() -> argparse.Namespace:
         "verify watchdog state survives stop/resume. Never use on a real run.",
     )
     args = p.parse_args()
-    if args.resume == "latest":
+    if args.resume in ("latest", "best"):
         if not args.run_dir:
-            p.error("--resume latest requires --run-dir <path>")
-        args.resume = str(Path(args.run_dir) / "checkpoint_latest.pt")
+            p.error(f"--resume {args.resume} requires --run-dir <path>")
+        args.resume = str(Path(args.run_dir) / f"checkpoint_{args.resume}.pt")
     if args.resume and args.init_from:
         p.error("--resume and --init-from are mutually exclusive")
+    if args.set_lr_brain is not None and not args.resume:
+        p.error("--set-lr-brain only applies with --resume")
+    if args.config is None:
+        recorded = Path(args.resume).resolve().parent / "train_config.txt" if args.resume else None
+        args.config = recorded.read_text().strip() if recorded and recorded.exists() else "configs/bc.yaml"
     return args
+
+
+def lr_factor(step: int, schedule: dict | None) -> float:
+    """D36: cosine decay from 1 at schedule.start_step to final_frac at
+    start_step + duration_steps, flat outside that range. No schedule -> 1."""
+    if not schedule:
+        return 1.0
+    t = (step - schedule["start_step"]) / schedule["duration_steps"]
+    t = min(max(t, 0.0), 1.0)
+    final = schedule["final_frac"]
+    return final + (1.0 - final) * 0.5 * (1.0 + math.cos(math.pi * t))
+
+
+def apply_lr_schedule(optimizer: torch.optim.Optimizer, step: int, schedule: dict | None) -> None:
+    """lr = base_lr * lr_factor(step) for every param group. base_lr lives in
+    the param group itself, so it's saved/restored with the optimizer state."""
+    f = lr_factor(step, schedule)
+    for group in optimizer.param_groups:
+        group.setdefault("base_lr", group["lr"])
+        group["lr"] = group["base_lr"] * f
+
+
+def should_advance_curriculum(watchdog: GradWatchdog, difficulty: str, advance_hit_rate: float) -> bool:
+    """D36: advance when the eval_ma_window-eval moving average at the current
+    difficulty reaches advance_hit_rate (not a single eval)."""
+    ma = watchdog.eval_ma(difficulty)
+    return ma is not None and ma >= advance_hit_rate
 
 
 def existing_run_dirs(run_name: str, runs_root: Path = Path("runs")) -> list[Path]:
@@ -292,18 +335,20 @@ def apply_gradient_step(
 
 def perform_rollback(policy, optimizer: torch.optim.Optimizer, healthy_checkpoint_path: Path, watchdog: GradWatchdog, device) -> torch.optim.Optimizer:
     """Restores policy weights from healthy_checkpoint_path, halves the
-    brain parameter group's LR, and rebuilds the optimizer from scratch
+    brain parameter group's LR (its base_lr, which the D36 schedule scales),
+    and rebuilds the optimizer from scratch
     (D30: Adam's moments may already be contaminated by the unhealthy
     stretch, so they're not carried across a rollback). Returns the new
     optimizer -- callers must rebind their local `optimizer` to it."""
     ckpt = torch.load(healthy_checkpoint_path, map_location=device)
     policy.load_state_dict(ckpt["model_state"])
-    lr_readout = optimizer.param_groups[0]["lr"]
-    lr_brain = optimizer.param_groups[1]["lr"] / 2.0
+    g_readout, g_brain = optimizer.param_groups[0], optimizer.param_groups[1]
+    base_readout = g_readout.get("base_lr", g_readout["lr"])
+    base_brain = g_brain.get("base_lr", g_brain["lr"]) / 2.0
     new_optimizer = torch.optim.AdamW(
         [
-            {"params": list(policy.readout_parameters()), "lr": lr_readout},
-            {"params": list(policy.non_readout_parameters()), "lr": lr_brain},
+            {"params": list(policy.readout_parameters()), "lr": g_readout["lr"], "base_lr": base_readout},
+            {"params": list(policy.non_readout_parameters()), "lr": g_brain["lr"] / 2.0, "base_lr": base_brain},
         ]
     )
     watchdog.note_rollback()
@@ -350,17 +395,20 @@ def main() -> None:
     policy = build_policy(args.model, cfg_bc, cfg_game, cfg_brain, photo_map, device, dtype)
     optimizer = torch.optim.AdamW(
         [
-            {"params": list(policy.readout_parameters()), "lr": cfg_bc["lr_readout"]},
-            {"params": list(policy.non_readout_parameters()), "lr": cfg_bc["lr_brain"]},
+            {"params": list(policy.readout_parameters()), "lr": cfg_bc["lr_readout"], "base_lr": cfg_bc["lr_readout"]},
+            {"params": list(policy.non_readout_parameters()), "lr": cfg_bc["lr_brain"], "base_lr": cfg_bc["lr_brain"]},
         ]
     )
+    lr_schedule = cfg_bc.get("lr_schedule")
     # D30/D31 (docs/DECISIONS.md): overnight-stability watchdog + the
     # magnitude bound used by apply_gradient_step's outlier sanitization.
     # D33: watchdog state is saved in every checkpoint and restored on
     # --resume (rollback count, baseline, best hit_rate); the halved brain
     # LR rides along in the optimizer state. Thresholds can be overridden
     # via an optional `watchdog:` config section (tests use a tiny window).
-    watchdog = GradWatchdog(**cfg_bc.get("watchdog", {}))
+    watchdog_cfg = dict(cfg_bc.get("watchdog", {}))
+    watchdog = GradWatchdog(**watchdog_cfg)
+    eval_kwargs = {k: v for k, v in watchdog_cfg.items() if k in ("eval_ma_window", "rollback_eval_drop")}
     grad_outlier_clip = float(cfg_bc.get("grad_outlier_clip", 10000.0))
 
     difficulties = [args.fixed_difficulty] if args.fixed_difficulty else cfg_bc["curriculum"]["difficulties"]
@@ -395,6 +443,11 @@ def main() -> None:
         ckpt = torch.load(args.resume, map_location=device)
         policy.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
+        for group in optimizer.param_groups:  # pre-D36 checkpoints have no base_lr
+            group.setdefault("base_lr", group["lr"])
+        if args.set_lr_brain is not None:
+            print(f"[lr] brain base_lr {optimizer.param_groups[1]['base_lr']:.3e} -> {args.set_lr_brain:.3e} (--set-lr-brain)")
+            optimizer.param_groups[1]["base_lr"] = args.set_lr_brain
         step = ckpt["step"]
         difficulty_idx = ckpt["difficulty_idx"]
         pos_weight = ckpt["pos_weight"]
@@ -406,13 +459,17 @@ def main() -> None:
             src = "checkpoint"
         else:
             # pre-D33 checkpoint: recover what metrics.jsonl records.
-            rec = reconstruct_from_metrics(Path(args.resume).resolve().parent / "metrics.jsonl", step)
+            rec = reconstruct_from_metrics(Path(args.resume).resolve().parent / "metrics.jsonl", step, **eval_kwargs)
             watchdog.best_hit_rate = rec["best_hit_rate"]
             watchdog.rollback_count = rec["rollback_count"]
+            watchdog.eval_history = rec["eval_history"]
+            watchdog.best_eval_ma = rec["best_eval_ma"]
             src = "metrics.jsonl (pre-D33 checkpoint; rolling window re-established from scratch)"
         print(f"[watchdog] restored from {src}: rollback_count={watchdog.rollback_count} "
               f"healthy_baseline={watchdog.healthy_baseline} window_len={len(watchdog._recent)} "
-              f"best_hit_rate={watchdog.best_hit_rate} lr_brain={optimizer.param_groups[1]['lr']:.3e}")
+              f"best_hit_rate={watchdog.best_hit_rate} eval_history={watchdog.eval_history} "
+              f"best_eval_ma={watchdog.best_eval_ma} base_lr_brain={optimizer.param_groups[1]['base_lr']:.3e} "
+              f"base_lr_readout={optimizer.param_groups[0]['base_lr']:.3e}")
     elif args.init_from:
         # D30: fork a brand-new run from an arbitrary (e.g. backup)
         # checkpoint, unlike --resume which continues writing into the
@@ -435,7 +492,7 @@ def main() -> None:
             watchdog.best_hit_rate = dict(ckpt["watchdog_state"]["best_hit_rate"])
         else:
             watchdog.best_hit_rate = reconstruct_from_metrics(
-                Path(args.init_from).resolve().parent / "metrics.jsonl", step,
+                Path(args.init_from).resolve().parent / "metrics.jsonl", step, **eval_kwargs,
             )["best_hit_rate"]
         print(f"[watchdog] fork inherits best_hit_rate={watchdog.best_hit_rate}")
     else:
@@ -456,13 +513,38 @@ def main() -> None:
         run_name = args.run_name or f"bc_{args.model}"
         run_dir = make_run_dir(run_name, args.config, seed)
         for extra_cfg in (args.game_config, args.brain_config) if args.model == "connectome" else (args.game_config,):
-            import shutil
-
             shutil.copy(extra_cfg, run_dir / Path(extra_cfg).name)
         (run_dir / "model_kind.txt").write_text(args.model + "\n")
         if args.init_from:
             (run_dir / "init_from.txt").write_text(f"{args.init_from}\n")
     metrics_path = run_dir / "metrics.jsonl"
+    # Later bare `--resume` calls (fly.sh resume / guard) reuse this config.
+    (run_dir / "train_config.txt").write_text(f"{args.config}\n")
+    if args.resume:
+        # Snapshot of what this resume ran with (the run dir's bc.yaml is the
+        # launch-time copy).
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        shutil.copy(args.config, run_dir / f"resume_{stamp}_step{step}_{Path(args.config).name}")
+        resolved = Path(args.resume).resolve()
+        latest = run_dir / "checkpoint_latest.pt"
+        latest_step = max([step] + [r.get("step", 0) for r in load_metrics_lineage(metrics_path)])
+        if latest.exists() and latest.resolve().stem.startswith("checkpoint_step"):
+            latest_step = max(latest_step, int(latest.resolve().stem.removeprefix("checkpoint_step")))
+        with metrics_path.open("a") as f:
+            f.write(json.dumps(dict(
+                step=step, time=time.time(), resumed_from_step=step, resumed_from=resolved.name,
+                config=args.config, git_sha=git_sha(), set_lr_brain=args.set_lr_brain,
+                discarded_after_step=latest_step if latest_step > step else None,
+            )) + "\n")
+        if not (latest.exists() and latest.resolve() == resolved):
+            # Resuming from an older checkpoint (e.g. --resume best): later
+            # steps are an abandoned branch; a crash auto-resume before the
+            # next checkpoint must come back here, not to that branch.
+            print(f"[resume] checkpoint_latest.pt -> {resolved.name} "
+                  f"(steps {step + 1}-{latest_step} abandoned; files kept)")
+            if latest.exists() or latest.is_symlink():
+                latest.unlink()
+            latest.symlink_to(resolved.name)
     tb_writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     print(f"run dir: {run_dir}")
 
@@ -475,8 +557,10 @@ def main() -> None:
     nan_steps = 0
     window_steps = 0
 
+    saved_step = None
+
     def do_checkpoint(reason: str) -> None:
-        nonlocal last_checkpoint_time
+        nonlocal last_checkpoint_time, saved_step
         path = run_dir / f"checkpoint_step{step}.pt"
         from train.common import save_checkpoint
 
@@ -489,6 +573,7 @@ def main() -> None:
             latest.unlink()
         latest.symlink_to(path.name)
         last_checkpoint_time = time.time()
+        saved_step = step
         print(f"checkpoint saved: {path} (reason={reason})")
 
     try:
@@ -502,6 +587,7 @@ def main() -> None:
                 break
 
             t0 = time.time()
+            apply_lr_schedule(optimizer, step, lr_schedule)
             current_frac = 1.0 if args.fixed_difficulty else (1.0 - cfg_bc["curriculum"]["earlier_frac"])
             clips, fret_bits_list, strum_list = [], [], []
             for _ in range(batch_size):
@@ -593,6 +679,8 @@ def main() -> None:
                     rolling_median_grad_norm=watchdog.rolling_median(),
                     watchdog_skip_rate=watchdog.skip_count / max(watchdog.total_steps, 1),
                     rollback_count=watchdog.rollback_count,
+                    lr_readout=optimizer.param_groups[0]["lr"], lr_brain=optimizer.param_groups[1]["lr"],
+                    watchdog_baseline=watchdog.healthy_baseline, long_median_grad_norm=watchdog.long_median(),
                 )
                 with metrics_path.open("a") as f:
                     f.write(json.dumps(record) + "\n")
@@ -601,14 +689,6 @@ def main() -> None:
                         tb_writer.add_scalar(k, v, step)
                 step_times = step_times[-50:]
 
-            if step % cfg_bc["checkpoint_interval_steps"] == 0 or (time.time() - last_checkpoint_time) >= cfg_bc["checkpoint_interval_s"]:
-                do_checkpoint("interval")
-                if watchdog.is_healthy_now():
-                    healthy_path = run_dir / "checkpoint_last_healthy.pt"
-                    if healthy_path.exists() or healthy_path.is_symlink():
-                        healthy_path.unlink()
-                    healthy_path.symlink_to(f"checkpoint_step{step}.pt")
-
             if step % cfg_bc["eval"]["interval_steps"] == 0:
                 eval_t0 = time.time()
                 current_difficulty = difficulties[difficulty_idx]
@@ -616,31 +696,32 @@ def main() -> None:
                     policy, env, val_set[current_difficulty], burn_in_s, fps, hit_window_s, device, dtype,
                 )
                 eval_wall_s = time.time() - eval_t0
+                # Overnight safeguards (D30/D31/D35): track the best checkpoint
+                # at this difficulty, and roll back if the eval moving average
+                # has fallen.
+                prev_best = watchdog.best_hit_rate.get(current_difficulty)
+                should_rollback_eval = watchdog.record_eval(current_difficulty, result["hit_rate"])
+                eval_ma = watchdog.eval_ma(current_difficulty)
                 record = dict(
                     step=step, time=time.time(), eval_difficulty=current_difficulty, eval_hit_rate=result["hit_rate"],
                     eval_overstrums_per_min=result["overstrums_per_min"], eval_n_songs=result["n_songs"],
-                    eval_wall_s=eval_wall_s,
+                    eval_wall_s=eval_wall_s, eval_ma=eval_ma,
+                    best_eval_ma=watchdog.best_eval_ma.get(current_difficulty),
                 )
                 with metrics_path.open("a") as f:
                     f.write(json.dumps(record) + "\n")
                 tb_writer.add_scalar("eval_hit_rate", result["hit_rate"], step)
                 tb_writer.add_scalar("eval_overstrums_per_min", result["overstrums_per_min"], step)
+                if eval_ma is not None:
+                    tb_writer.add_scalar("eval_hit_rate_ma", eval_ma, step)
                 print(
                     f"[eval step={step}] difficulty={current_difficulty} hit_rate={result['hit_rate']:.4f} "
+                    f"ma={eval_ma if eval_ma is None else round(eval_ma, 4)} "
                     f"overstrums/min={result['overstrums_per_min']:.2f} wall={eval_wall_s:.1f}s"
                 )
-
-                # Overnight safeguards (D30/D31): track the best checkpoint at
-                # this difficulty, and roll back if hit_rate has cratered.
-                prev_best = watchdog.best_hit_rate.get(current_difficulty)
-                should_rollback_eval = watchdog.record_eval(current_difficulty, result["hit_rate"])
                 is_new_best = prev_best is None or result["hit_rate"] > prev_best
                 if is_new_best:
-                    best_path, ckpt_path = run_dir / "checkpoint_best.pt", run_dir / f"checkpoint_step{step}.pt"
-                    if ckpt_path.exists():
-                        if best_path.exists() or best_path.is_symlink():
-                            best_path.unlink()
-                        best_path.symlink_to(ckpt_path.name)
+                    should_rollback_eval = False  # never roll back on the best single eval so far
                 if should_rollback_eval:
                     healthy_path = run_dir / "checkpoint_last_healthy.pt"
                     if healthy_path.exists():
@@ -660,7 +741,11 @@ def main() -> None:
                     else:
                         print("[watchdog] eval hit_rate drop detected but no checkpoint_last_healthy.pt yet -- continuing")
 
-                if not args.fixed_difficulty and result["hit_rate"] >= cfg_bc["curriculum"]["advance_hit_rate"] and difficulty_idx < len(difficulties) - 1:
+                if (
+                    not args.fixed_difficulty and not should_rollback_eval
+                    and should_advance_curriculum(watchdog, current_difficulty, cfg_bc["curriculum"]["advance_hit_rate"])
+                    and difficulty_idx < len(difficulties) - 1
+                ):
                     difficulty_idx += 1
                     new_difficulty = difficulties[difficulty_idx]
                     pos_weight = estimate_strum_pos_weight(
@@ -669,6 +754,28 @@ def main() -> None:
                     print(f"[curriculum] advanced to {new_difficulty}, new strum pos_weight={pos_weight:.3f}")
                     with metrics_path.open("a") as f:
                         f.write(json.dumps(dict(step=step, time=time.time(), curriculum_advanced_to=new_difficulty, new_pos_weight=pos_weight)) + "\n")
+
+                if is_new_best:
+                    # Save the evaluated weights now, with this eval (and any
+                    # curriculum advance it caused) in the saved state; the
+                    # interval block below won't save this step again.
+                    do_checkpoint("interval_best" if step % cfg_bc["checkpoint_interval_steps"] == 0 else "eval_best")
+                    best_path = run_dir / "checkpoint_best.pt"
+                    if best_path.exists() or best_path.is_symlink():
+                        best_path.unlink()
+                    best_path.symlink_to(f"checkpoint_step{step}.pt")
+
+            # After the eval, so a checkpoint at an eval step carries that
+            # eval in its watchdog state (a resume from it -- e.g. --resume
+            # best -- must not treat the next eval as a new best).
+            if step % cfg_bc["checkpoint_interval_steps"] == 0 or (time.time() - last_checkpoint_time) >= cfg_bc["checkpoint_interval_s"]:
+                if saved_step != step:
+                    do_checkpoint("interval")
+                if watchdog.is_healthy_now():
+                    healthy_path = run_dir / "checkpoint_last_healthy.pt"
+                    if healthy_path.exists() or healthy_path.is_symlink():
+                        healthy_path.unlink()
+                    healthy_path.symlink_to(f"checkpoint_step{step}.pt")
 
     except Exception as exc:
         print(f"[watchdog] CRASH: {exc!r}")

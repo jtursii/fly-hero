@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fly Brain Hero — training controls. Run from the project folder.
-# Usage: ./fly.sh [check|awake|stop|resume|guard|video|log]
+# Usage: ./fly.sh [check|awake|stop|resume [latest|best]|guard|video|log]
 set -uo pipefail
 
 # Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real
@@ -10,8 +10,11 @@ set -uo pipefail
 RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_bc_full_real(_v[0-9]+)?$' | sort | tail -n1)}"
 RUN="${RUN%/}"
 MODEL="${MODEL:-connectome}"
-# Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests).
+# Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests,
+# or a one-shot EXTRA_ARGS="--set-lr-brain 2.5e-5").
 EXTRA_ARGS="${EXTRA_ARGS:-}"
+# Config for resume. Unset: train.bc reuses $RUN/train_config.txt (D36).
+CONFIG="${CONFIG:-}"
 RUN_NAME=$(basename "${RUN:-__none__}" | sed -E 's/^[0-9]{8}_[0-9]{6}_//')
 
 # D33: the pid of the train.bc *python* process (never the uv wrapper, never
@@ -49,8 +52,8 @@ for line in sys.stdin:
 ' "$RUN_ABS"
 }
 
-ckpt_step() {  # step number of checkpoint_latest.pt, from its target's file name
-  readlink "$RUN/checkpoint_latest.pt" 2>/dev/null | sed -E 's/^checkpoint_step([0-9]+)\.pt$/\1/'
+ckpt_step() {  # step number of checkpoint_<latest|best>.pt, from its target's file name
+  readlink "$RUN/checkpoint_${1:-latest}.pt" 2>/dev/null | sed -E 's/^checkpoint_step([0-9]+)\.pt$/\1/'
 }
 
 require_run() {
@@ -61,11 +64,14 @@ require_run() {
 }
 
 resume_cmd() {
-  # Always --resume latest --run-dir: continues $RUN in place from its own
-  # newest checkpoint. Never --init-from -- for bc_full_real_v2 that would
-  # re-fork from step 13000 and discard everything since (guarded below and
-  # in train/bc.py). --run-name is informational once --resume is set.
-  echo "uv run python -u -m train.bc --model $MODEL --run-name $RUN_NAME --resume latest --run-dir $RUN $EXTRA_ARGS"
+  # Always --resume <latest|best> --run-dir: continues $RUN in place from its
+  # own newest (or best) checkpoint. Never --init-from -- for bc_full_real_v2
+  # that would re-fork from step 13000 and discard everything since (guarded
+  # below and in train/bc.py). --run-name is informational once --resume is
+  # set. Resuming from best abandons later steps; train.bc repoints
+  # checkpoint_latest.pt to the resumed checkpoint (files are kept).
+  local cfg=""; [ -n "$CONFIG" ] && cfg="--config $CONFIG"
+  echo "uv run python -u -m train.bc --model $MODEL --run-name $RUN_NAME --resume $1 --run-dir $RUN $cfg $EXTRA_ARGS"
 }
 
 case "${1:-}" in
@@ -106,7 +112,7 @@ for line in lines:
       echo "--- watchdog (overnight safeguards, D30/D31) ---"
       tail -n 2000 "$RUN/metrics.jsonl" | python3 -c "
 import json, sys
-last_train, rollbacks, best_by_diff = None, [], {}
+last_train, rollbacks, best_by_diff, last_eval_ma = None, [], {}, None
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -119,8 +125,14 @@ for line in sys.stdin:
         last_train = r
     if r.get('rollback'):
         rollbacks.append(r)
+    if r.get('resumed_from_step') is not None:
+        x = r['resumed_from_step']
+        rollbacks = [q for q in rollbacks if q.get('step', 0) <= x]
+        best_by_diff = {d: v for d, v in best_by_diff.items() if (v[1] or 0) <= x}
     if 'eval_hit_rate' in r:
         d = r.get('eval_difficulty')
+        if r.get('eval_ma') is not None:
+            last_eval_ma = (d, r['eval_ma'], r.get('best_eval_ma'))
         if d is not None and r['eval_hit_rate'] > best_by_diff.get(d, (-1, None))[0]:
             best_by_diff[d] = (r['eval_hit_rate'], r.get('step'))
 
@@ -129,10 +141,22 @@ if last_train:
     print('rolling median grad_norm (last %d steps): %s' % (200, ('%.3f' % median) if median is not None else 'n/a (warming up)'))
     print('skip rate (cumulative): %.3f%%  rollback count: %s' % (
         100 * last_train.get('watchdog_skip_rate', 0), last_train.get('rollback_count', 0)))
+    base = last_train.get('watchdog_baseline')
+    lm = last_train.get('long_median_grad_norm')
+    if base is not None:
+        print('watchdog baseline (frozen): %.1f  trigger: 200-step median > %.0f for 200 steps  '
+              'certify: 1000-step median (now %s) < %.0f' % (base, 3 * base, ('%.0f' % lm) if lm is not None else 'n/a', 2 * base))
+    else:
+        print('watchdog baseline: n/a (not logged by this process)')
+    if 'lr_brain' in last_train:
+        print('step %s  lr_brain: %.3e  lr_readout: %.3e' % (last_train['step'], last_train['lr_brain'], last_train['lr_readout']))
 else:
     print('no training records yet')
 for d, (hr, step) in best_by_diff.items():
     print('best hit_rate @ %s: %.4f (step %s)' % (d, hr, step))
+if last_eval_ma is not None:
+    print('eval 3-MA @ %s: %.4f (best %.4f; rollback if drop > 0.08; Hard at >= 0.75)' % (
+        last_eval_ma[0], last_eval_ma[1], last_eval_ma[2] or float('nan')))
 if rollbacks:
     print('rollback events:')
     for r in rollbacks:
@@ -170,24 +194,26 @@ if rollbacks:
     ;;
   resume)
     require_run
+    FROM="${2:-latest}"
+    case "$FROM" in latest|best) ;; *) echo "resume from must be latest or best, got: $FROM"; exit 1 ;; esac
     if [ -n "$(find_pid)" ]; then
       echo "Already running (pid $(find_pid)). Not starting a second copy."
       exit 1
     fi
-    if [ ! -L "$RUN/checkpoint_latest.pt" ]; then
-      echo "No checkpoint_latest.pt in $RUN -- nothing to resume from."
+    if [ ! -L "$RUN/checkpoint_$FROM.pt" ]; then
+      echo "No checkpoint_$FROM.pt in $RUN -- nothing to resume from."
       exit 1
     fi
-    CMD="$(resume_cmd)"
+    CMD="$(resume_cmd "$FROM")"
     case "$CMD" in
       *--init-from*) echo "Refusing: resume must never use --init-from (it would re-fork and reset the step)."; exit 1 ;;
-      *"--resume latest --run-dir $RUN "*) ;;
-      *) echo "Refusing: resume command is not '--resume latest --run-dir $RUN': $CMD"; exit 1 ;;
+      *"--resume $FROM --run-dir $RUN "*) ;;
+      *) echo "Refusing: resume command is not '--resume $FROM --run-dir $RUN': $CMD"; exit 1 ;;
     esac
     rm -f "$RUN/STOPPED_BY_USER"
-    EXPECT_STEP=$(ckpt_step)
+    EXPECT_STEP=$(ckpt_step "$FROM")
     echo "Running: $CMD"
-    echo "Expecting to resume at step $EXPECT_STEP (checkpoint_latest.pt)"
+    echo "Expecting to resume at step $EXPECT_STEP (checkpoint_$FROM.pt)"
     LOG_START=0; [ -f "$RUN/resume.log" ] && LOG_START=$(wc -l < "$RUN/resume.log")
     nohup $CMD >> "$RUN/resume.log" 2>&1 &
     echo "Starting... checking for up to 90s"
@@ -204,7 +230,7 @@ if rollbacks:
     fi
     if [ -n "$(find_pid)" ] && [ -n "$GOT_STEP" ]; then
       echo "✅ Resumed at step $GOT_STEP and running (pid $(find_pid))."
-      tail -n +"$((LOG_START + 1))" "$RUN/resume.log" | grep '^\[watchdog\] restored' || true
+      tail -n +"$((LOG_START + 1))" "$RUN/resume.log" | grep -E '^\[(watchdog\] restored|lr\]|resume\])' || true
     else
       echo "❌ Failed to start. Last log lines:"; tail -n 15 "$RUN/resume.log"
       echo "Paste this output to Claude."
@@ -303,7 +329,7 @@ if rollbacks:
     echo "./fly.sh check           → is it running + progress + last 5 evals + checkpoint age"
     echo "./fly.sh awake           → keep Mac awake (leave window open)"
     echo "./fly.sh stop            → stop cleanly (SIGTERM, saves checkpoint)"
-    echo "./fly.sh resume          → resume from the latest checkpoint (refuses if already running)"
+    echo "./fly.sh resume [best]   → resume from the latest (or best) checkpoint (refuses if already running)"
     echo "./fly.sh guard [--dry-run] → auto-resume after a crash (own terminal window; max 3/night)"
     echo "./fly.sh video [song] [difficulty] → render a gameplay video at the current checkpoint's skill"
     echo "./fly.sh log             → last lines of the resume log"

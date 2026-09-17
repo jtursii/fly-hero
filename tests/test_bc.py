@@ -8,6 +8,7 @@ in that check for the wrong reason)."""
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from flyhero.brain.baseline_gru import GRUBaseline
@@ -196,3 +197,99 @@ def test_checkpoint_round_trip_restores_full_training_state(tmp_path):
     # RNG streams resume exactly where they left off, not from a fresh seed.
     np.testing.assert_array_equal(fresh_rng.random(4), expected_next_numpy)
     torch.testing.assert_close(torch.rand(4), expected_next_torch)
+
+
+# ---------------------------------------------------------------------------
+# D36: LR schedule, rollback on base_lr, MA curriculum, --resume best
+# ---------------------------------------------------------------------------
+
+
+def test_lr_factor_cosine_to_quarter_over_20k():
+    from train.bc import lr_factor
+
+    sched = dict(start_step=42000, duration_steps=20000, final_frac=0.25)
+    assert lr_factor(41000, sched) == 1.0
+    assert lr_factor(42000, sched) == pytest.approx(1.0)
+    assert lr_factor(52000, sched) == pytest.approx(0.625)
+    assert lr_factor(62000, sched) == pytest.approx(0.25)
+    assert lr_factor(90000, sched) == pytest.approx(0.25)
+    assert lr_factor(50000, None) == 1.0
+
+
+def test_schedule_scales_base_lr_and_rollback_halves_it(tmp_path):
+    from train.bc import apply_lr_schedule, perform_rollback
+    from train.common import save_checkpoint
+    from train.watchdog import GradWatchdog
+
+    class Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.readout = torch.nn.Linear(2, 2)
+            self.brain = torch.nn.Linear(2, 2)
+
+        def readout_parameters(self):
+            return self.readout.parameters()
+
+        def non_readout_parameters(self):
+            return self.brain.parameters()
+
+    policy = Tiny()
+    opt = torch.optim.AdamW([
+        {"params": list(policy.readout_parameters()), "lr": 1e-3},
+        {"params": list(policy.non_readout_parameters()), "lr": 5e-5},  # pre-D36: no base_lr
+    ])
+    sched = dict(start_step=0, duration_steps=100, final_frac=0.25)
+    apply_lr_schedule(opt, 50, sched)
+    assert opt.param_groups[0]["base_lr"] == 1e-3
+    assert opt.param_groups[1]["lr"] == pytest.approx(5e-5 * 0.625)
+
+    path = tmp_path / "healthy.pt"
+    save_checkpoint(path, policy, opt, 0, 0, 1.0, np.random.default_rng(0), extra={})
+    opt2 = perform_rollback(policy, opt, path, GradWatchdog(), torch.device("cpu"))
+    apply_lr_schedule(opt2, 50, sched)
+    assert opt2.param_groups[1]["base_lr"] == pytest.approx(2.5e-5)
+    assert opt2.param_groups[1]["lr"] == pytest.approx(2.5e-5 * 0.625)
+    assert opt2.param_groups[0]["base_lr"] == 1e-3
+    # base_lr survives a checkpoint round trip
+    save_checkpoint(path, policy, opt2, 0, 0, 1.0, np.random.default_rng(0), extra={})
+    opt3 = torch.optim.AdamW([
+        {"params": list(policy.readout_parameters()), "lr": 9.0},
+        {"params": list(policy.non_readout_parameters()), "lr": 9.0},
+    ])
+    opt3.load_state_dict(torch.load(path)["optimizer_state"])
+    assert opt3.param_groups[1]["base_lr"] == pytest.approx(2.5e-5)
+
+
+def test_curriculum_advances_on_3_eval_moving_average_only():
+    from train.bc import should_advance_curriculum
+    from train.watchdog import GradWatchdog
+
+    wd = GradWatchdog(eval_ma_window=3)
+    wd.record_eval("Medium", 0.85)  # a single high eval is not enough
+    assert not should_advance_curriculum(wd, "Medium", 0.75)
+    wd.record_eval("Medium", 0.70)
+    wd.record_eval("Medium", 0.69)  # MA 0.7467
+    assert not should_advance_curriculum(wd, "Medium", 0.75)
+    wd.record_eval("Medium", 0.77)  # MA (0.70+0.69+0.77)/3 = 0.72
+    assert not should_advance_curriculum(wd, "Medium", 0.75)
+    wd.record_eval("Medium", 0.80)
+    wd.record_eval("Medium", 0.76)  # MA 0.7767
+    assert should_advance_curriculum(wd, "Medium", 0.75)
+
+
+def test_resume_best_resolves_and_reuses_recorded_config(tmp_path, monkeypatch):
+    import sys
+
+    from train.bc import parse_args
+
+    (tmp_path / "train_config.txt").write_text("configs/bc_full_real_v2.yaml\n")
+    monkeypatch.setattr(sys, "argv", ["bc", "--resume", "best", "--run-dir", str(tmp_path), "--set-lr-brain", "2.5e-5"])
+    args = parse_args()
+    assert args.resume == str(tmp_path / "checkpoint_best.pt")
+    assert args.config == "configs/bc_full_real_v2.yaml"
+    assert args.set_lr_brain == 2.5e-5
+    monkeypatch.setattr(sys, "argv", ["bc", "--resume", "latest", "--run-dir", str(tmp_path), "--config", "x.yaml"])
+    assert parse_args().config == "x.yaml"
+    monkeypatch.setattr(sys, "argv", ["bc", "--set-lr-brain", "1e-5"])
+    with pytest.raises(SystemExit):
+        parse_args()
