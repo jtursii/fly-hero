@@ -214,7 +214,8 @@ if rollbacks:
     # Crash auto-resume. Run in its own terminal window: ./fly.sh guard
     # Every GUARD_INTERVAL s (default 60): if RUN's training process is gone
     # and there is no STOPPED.txt / STOPPED_BY_USER, run `fly.sh resume` and
-    # log it to $RUN/guard.log. At most GUARD_MAX (default 3) auto-resumes
+    # log it to $RUN/guard.log. A STOPPED.txt from an exception ("crash:")
+    # gets one auto-resume per night; watchdog exhaustion / user stops never. At most GUARD_MAX (default 3) auto-resumes
     # per night (logged in the last 12 h). Exits on STOPPED.txt,
     # STOPPED_BY_USER, or the cap. --dry-run: only prints what it would do
     # (never resumes, never writes guard.log). --once: one check, then exit.
@@ -237,11 +238,37 @@ if rollbacks:
     echo "Guarding $RUN every ${INTERVAL}s (max $MAX auto-resumes/night)$([ "$DRY" = 1 ] && echo ' [DRY RUN]'). Ctrl+C to stop guarding."
     [ "$DRY" = 1 ] || glog "guard started (pid $$)"
     while true; do
-      if [ -f "$RUN/STOPPED.txt" ]; then
-        glog "STOPPED.txt present ($(head -n1 "$RUN/STOPPED.txt")) -- guard exiting"; exit 0
-      fi
       if [ -f "$RUN/STOPPED_BY_USER" ]; then
         glog "STOPPED_BY_USER present -- guard exiting"; exit 0
+      fi
+      if [ -f "$RUN/STOPPED.txt" ]; then
+        REASON=$(head -n1 "$RUN/STOPPED.txt")
+        # bc.py writes "stopped at step N: crash: <exception>" on an uncaught
+        # exception; rollback exhaustion is never resumed. One crash
+        # auto-resume per night; a second crash stays stopped.
+        case "$REASON" in
+          *": crash:"*)
+            SINCE=$(( $(date +%s) - 43200 ))
+            NC=$(awk -v s="$SINCE" '$1 >= s && /CRASH-RESUME/' "$GLOG" 2>/dev/null | wc -l | tr -d ' ')
+            NA=$(awk -v s="$SINCE" '$1 >= s && /AUTO-RESUME #/' "$GLOG" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$NC" -ge 1 ] || [ "$NA" -ge "$MAX" ] || [ -n "$(find_pid)" ]; then
+              glog "STOPPED.txt ($REASON): crash auto-resume already used tonight (or cap reached) -- staying stopped, guard exiting"; exit 1
+            fi
+            glog "AUTO-RESUME #$((NA + 1)) CRASH-RESUME: STOPPED.txt ($REASON) -- moving it to STOPPED.txt.crash-$(date +%s), running fly.sh resume"
+            if [ "$DRY" = 1 ]; then
+              echo "[dry-run] would run: mv $RUN/STOPPED.txt $RUN/STOPPED.txt.crash-<epoch>; RUN=$RUN $0 resume"
+            else
+              mv "$RUN/STOPPED.txt" "$RUN/STOPPED.txt.crash-$(date +%s)"
+              OUT=$(RUN="$RUN" "$0" resume 2>&1); RC=$?
+              glog "resume exit=$RC: $(echo "$OUT" | grep -E '✅|❌' | head -n1)"
+            fi
+            [ "$ONCE" = 1 ] && exit 0
+            sleep "$INTERVAL"; continue
+            ;;
+          *)
+            glog "STOPPED.txt present ($REASON) -- not a crash, never auto-resumed -- guard exiting"; exit 0
+            ;;
+        esac
       fi
       PID=$(find_pid)
       if [ -n "$PID" ]; then
