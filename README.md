@@ -63,15 +63,15 @@ PYTHONPATH=. uv run python -m flyhero.game.sim \
 ## Training controls (`fly.sh`)
 
 ```
-./fly.sh check    # is it running + progress + last 5 evals + checkpoint age
+./fly.sh check    # is it running + progress + last 5 evals + checkpoint age + watchdog + training time
 ./fly.sh awake    # keep the Mac awake while training (leave the window open)
 ./fly.sh stop     # SIGTERM the training process, waits for a clean checkpoint
-./fly.sh resume   # resume from the latest checkpoint (refuses if already running)
+./fly.sh resume   # resume in place: --resume latest --run-dir $RUN (never --init-from); refuses if already running
 ./fly.sh video [song] [difficulty]   # render a gameplay video at the current checkpoint's skill
 ./fly.sh log      # tail the resume log
 ```
 
-`RUN` defaults to the newest `runs/*bc_full_real*` directory; override with `RUN=path ./fly.sh ...`. `video` with no song picks the first fixed eval song at the checkpoint's current curriculum difficulty (same 60s excerpt `bc.py`'s own eval scores — the printed `hit_rate` matches it exactly); an explicit song name is fuzzy-matched against val/test songs (`--allow-train` to include train-split songs), and lists matches if ambiguous. Add `--device cpu` if rendering is slow, `--audio guitar` for the guitar stem only (default: every stem mixed), `--ckpt <path>` to pick a specific checkpoint instead of the latest. Output goes to `media/videos/` (gitignored).
+`RUN` defaults to the newest `runs/<timestamp>_bc_full_real` or `..._bc_full_real_vN` directory (currently `bc_full_real_v2`); override with `RUN=path ./fly.sh ...`. Only the `train.bc` process writing to that exact run dir is detected (not throwaway, smoke, or video runs). `resume` prints the step it expects (from `checkpoint_latest.pt`), stops the new process if it comes up at a different step, and shows the restored watchdog state (rollback count, baseline, best hit_rate, brain LR). `EXTRA_ARGS="--device cpu ..."` appends flags to the resume command. `check` shows **lineage training time** (active time along the runs the current weights descend from, e.g. `bc_full_real` up to step 13000 plus v2) and **total compute** (all runs, including discarded steps and smoke runs), with a per-run breakdown. Gaps over 5 min don't count. `video` with no song picks the first fixed eval song at the checkpoint's current curriculum difficulty (same 60s excerpt `bc.py`'s own eval scores — the printed `hit_rate` matches it exactly); an explicit song name is fuzzy-matched against val/test songs (`--allow-train` to include train-split songs), and lists matches if ambiguous. Add `--device cpu` if rendering is slow, `--audio guitar` for the guitar stem only (default: every stem mixed), `--ckpt <path>` to pick a specific checkpoint instead of the latest. Output goes to `media/videos/` (gitignored).
 
 ## Repo layout
 

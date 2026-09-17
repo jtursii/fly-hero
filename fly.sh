@@ -3,25 +3,54 @@
 # Usage: ./fly.sh [check|awake|stop|resume|video|log]
 set -uo pipefail
 
-# Defaults to the newest bc_full_real run dir (not a hardcoded timestamp --
-# a fresh overnight run gets a new timestamped dir every launch). Override
-# with RUN=path/to/run ./fly.sh check
-RUN="${RUN:-$(ls -td runs/*bc_full_real*/ 2>/dev/null | head -n1 | sed 's:/$::')}"
+# Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real
+# or runs/<timestamp>_bc_full_real_vN, newest by the timestamp in its name
+# (not mtime, and never throwaway runs like smoke_d32/resume_test_v2).
+# Override with RUN=path/to/run ./fly.sh check
+RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_bc_full_real(_v[0-9]+)?$' | sort | tail -n1)}"
+RUN="${RUN%/}"
 MODEL="${MODEL:-connectome}"
-
-# make_run_dir() prefixes the run dir with a timestamp, but the *process*
-# command line only ever shows the plain --run-name it was launched with
-# (e.g. "bc_full_real", not "20260916_123616_bc_full_real") -- strip the
-# "YYYYMMDD_HHMMSS_" prefix back off $RUN's basename to match it. Matches
-# only train.bc's *python* process for this run name, never the uv wrapper
-# (excluded below) and never scripts/render_gameplay_video.py (a different
-# module path -- "train.bc" doesn't appear in its invocation).
+# Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests).
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 RUN_NAME=$(basename "${RUN:-__none__}" | sed -E 's/^[0-9]{8}_[0-9]{6}_//')
-PATTERN="train\.bc.*--run-name[= ]${RUN_NAME}\b"
 
+# D33: the pid of the train.bc *python* process (never the uv wrapper, never
+# scripts/render_gameplay_video.py) that is writing to exactly $RUN: either
+# it was launched with --run-dir $RUN, or its pid is in the name of a
+# TensorBoard event file inside $RUN/tb (events.out.tfevents.<t>.<host>.<pid>.N
+# -- covers fresh/--init-from launches, whose command line only names the
+# run, not the dir; such a launch is invisible for its first ~minute, until
+# the writer is created). Name matching alone would confuse bc_full_real
+# with bc_full_real_v2 or a throwaway fork.
 find_pid() {
   [ -z "${RUN:-}" ] && return
-  ps -Ao pid,command | grep -E "$PATTERN" | grep -v grep | grep -v "uv run" | awk '{print $1}' | head -n1
+  [ -d "$RUN" ] || return
+  RUN_ABS=$(cd "$RUN" && pwd -P)
+  ps -Ao pid=,command= | python3 -c '
+import glob, os, sys
+run_abs = sys.argv[1]
+tb_pids = {os.path.basename(f).split(".")[-2] for f in glob.glob(os.path.join(run_abs, "tb", "events.out.tfevents.*"))}
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) < 3:
+        continue
+    pid, argv = parts[0], parts[1:]
+    if "python" not in os.path.basename(argv[0]):
+        continue
+    if not any(a == "-m" and b == "train.bc" for a, b in zip(argv, argv[1:])):
+        continue
+    run_dir = next((b for a, b in zip(argv, argv[1:]) if a == "--run-dir"), None)
+    if run_dir is not None:
+        if os.path.realpath(run_dir.rstrip("/")) == run_abs:
+            print(pid); break
+        continue
+    if pid in tb_pids:
+        print(pid); break
+' "$RUN_ABS"
+}
+
+ckpt_step() {  # step number of checkpoint_latest.pt, from its target's file name
+  readlink "$RUN/checkpoint_latest.pt" 2>/dev/null | sed -E 's/^checkpoint_step([0-9]+)\.pt$/\1/'
 }
 
 require_run() {
@@ -32,12 +61,11 @@ require_run() {
 }
 
 resume_cmd() {
-  # --run-name is actually unused by bc.py's run-dir resolution once
-  # --resume is set (it continues the dir --resume/--run-dir point at
-  # instead) -- but it must still be the plain, timestamp-stripped name
-  # ($RUN_NAME) so find_pid()'s PATTERN (built from the same value) can
-  # find this process again.
-  echo "uv run python -m train.bc --model $MODEL --run-name $RUN_NAME --resume latest --run-dir $RUN"
+  # Always --resume latest --run-dir: continues $RUN in place from its own
+  # newest checkpoint. Never --init-from -- for bc_full_real_v2 that would
+  # re-fork from step 13000 and discard everything since (guarded below and
+  # in train/bc.py). --run-name is informational once --resume is set.
+  echo "uv run python -u -m train.bc --model $MODEL --run-name $RUN_NAME --resume latest --run-dir $RUN $EXTRA_ARGS"
 }
 
 case "${1:-}" in
@@ -53,6 +81,8 @@ case "${1:-}" in
     LATEST=$(ls -t "$RUN" 2>/dev/null | head -n 1)
     [ -n "$LATEST" ] && echo "last file written: $LATEST ($(( ($(date +%s) - $(stat -f %m "$RUN/$LATEST")) / 60 )) min ago)"
     scripts/status.sh "$RUN"
+    echo "--- training time (active; gaps > 5 min not counted) ---"
+    uv run --quiet python scripts/training_time.py "$RUN" 2>/dev/null || echo "(training time unavailable)"
 
     if [ -L "$RUN/checkpoint_latest.pt" ]; then
       CKPT_TARGET="$RUN/$(readlink "$RUN/checkpoint_latest.pt")"
@@ -147,12 +177,32 @@ if rollbacks:
       echo "No checkpoint_latest.pt in $RUN -- nothing to resume from."
       exit 1
     fi
-    echo "Running: $(resume_cmd)"
-    nohup $(resume_cmd) >> "$RUN/resume.log" 2>&1 &
-    echo "Starting... checking in 30s"
-    sleep 30
-    if [ -n "$(find_pid)" ]; then
-      echo "✅ Resumed and running (pid $(find_pid))."
+    CMD="$(resume_cmd)"
+    case "$CMD" in
+      *--init-from*) echo "Refusing: resume must never use --init-from (it would re-fork and reset the step)."; exit 1 ;;
+      *"--resume latest --run-dir $RUN "*) ;;
+      *) echo "Refusing: resume command is not '--resume latest --run-dir $RUN': $CMD"; exit 1 ;;
+    esac
+    EXPECT_STEP=$(ckpt_step)
+    echo "Running: $CMD"
+    echo "Expecting to resume at step $EXPECT_STEP (checkpoint_latest.pt)"
+    LOG_START=0; [ -f "$RUN/resume.log" ] && LOG_START=$(wc -l < "$RUN/resume.log")
+    nohup $CMD >> "$RUN/resume.log" 2>&1 &
+    echo "Starting... checking for up to 90s"
+    GOT_STEP=""
+    for i in $(seq 1 45); do
+      sleep 2
+      GOT_STEP=$(tail -n +"$((LOG_START + 1))" "$RUN/resume.log" 2>/dev/null | sed -nE 's/^resumed from .* at step=([0-9]+) .*/\1/p' | head -n1)
+      [ -n "$GOT_STEP" ] && break
+    done
+    if [ -n "$GOT_STEP" ] && [ "$GOT_STEP" != "$EXPECT_STEP" ]; then
+      echo "❌ Resumed at step $GOT_STEP, expected $EXPECT_STEP -- stopping it."
+      P=$(find_pid); [ -n "$P" ] && kill -TERM "$P"
+      exit 1
+    fi
+    if [ -n "$(find_pid)" ] && [ -n "$GOT_STEP" ]; then
+      echo "✅ Resumed at step $GOT_STEP and running (pid $(find_pid))."
+      tail -n +"$((LOG_START + 1))" "$RUN/resume.log" | grep '^\[watchdog\] restored' || true
     else
       echo "❌ Failed to start. Last log lines:"; tail -n 15 "$RUN/resume.log"
       echo "Paste this output to Claude."
@@ -174,6 +224,6 @@ if rollbacks:
     echo "./fly.sh video [song] [difficulty] → render a gameplay video at the current checkpoint's skill"
     echo "./fly.sh log             → last lines of the resume log"
     echo ""
-    echo "RUN defaults to the newest runs/*bc_full_real* dir; override with RUN=path ./fly.sh ..."
+    echo "RUN defaults to the newest runs/<timestamp>_bc_full_real[_vN] dir; override with RUN=path ./fly.sh ..."
     ;;
 esac

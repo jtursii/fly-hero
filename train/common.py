@@ -127,7 +127,7 @@ def make_training_clip(
 
 def save_checkpoint(
     path: Path, model, optimizer, step: int, difficulty_idx: int, pos_weight: float,
-    numpy_rng: np.random.Generator, extra: dict,
+    numpy_rng: np.random.Generator, extra: dict, watchdog_state: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -140,6 +140,7 @@ def save_checkpoint(
             "numpy_rng_state": numpy_rng.bit_generator.state,
             "torch_rng_state": torch.get_rng_state(),
             "extra": extra,
+            "watchdog_state": watchdog_state,
         },
         path,
     )

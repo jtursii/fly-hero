@@ -252,3 +252,66 @@ def test_end_to_end_skip_then_rollback_then_lr_halve_then_clean_stop(tmp_path):
     write_stopped_file(tmp_path, "2 rollbacks exhausted (last reason=sustained_grad_elevation)", 999)
     stopped_text = (tmp_path / "STOPPED.txt").read_text()
     assert "999" in stopped_text and "exhausted" in stopped_text
+
+
+# ---------------------------------------------------------------------------
+# D33: state persistence across stop/resume
+# ---------------------------------------------------------------------------
+
+
+def test_state_dict_round_trip_through_checkpoint(tmp_path):
+    import numpy as np
+
+    wd = GradWatchdog(window=5)
+    _fill_baseline(wd, value=100.0)
+    wd.record_step(3000.0, n_bad_elems=0)  # skip
+    wd.record_eval("Medium", 0.52)
+    wd.record_eval("Medium", 0.30)  # one bad eval pending
+    wd.note_rollback()
+    for v in (90.0, 110.0):
+        wd.record_step(v, n_bad_elems=0)
+
+    model = torch.nn.Linear(3, 2)
+    opt = torch.optim.AdamW([{"params": [model.weight], "lr": 1e-3}, {"params": [model.bias], "lr": 5e-5}])
+    path = tmp_path / "ckpt.pt"
+    save_checkpoint(path, model, opt, 7, 1, 2.0, np.random.default_rng(0), extra={}, watchdog_state=wd.state_dict())
+
+    ckpt = torch.load(path)
+    restored = GradWatchdog(window=5)
+    restored.load_state_dict(ckpt["watchdog_state"])
+    assert restored.state_dict() == wd.state_dict()
+    assert restored.rollback_count == 1 and restored.best_hit_rate == {"Medium": 0.52}
+    assert restored.rolling_median() == wd.rolling_median()
+    # the halved brain LR is restored by the optimizer state, not the watchdog
+    opt2 = torch.optim.AdamW([{"params": [model.weight], "lr": 1e-3}, {"params": [model.bias], "lr": 1e-4}])
+    opt2.load_state_dict(ckpt["optimizer_state"])
+    assert opt2.param_groups[1]["lr"] == 5e-5
+
+
+def test_reconstruct_from_metrics_respects_step_bound(tmp_path):
+    import json
+
+    from train.watchdog import reconstruct_from_metrics
+
+    lines = [
+        dict(step=1000, eval_difficulty="Easy", eval_hit_rate=0.8),
+        dict(step=2000, eval_difficulty="Medium", eval_hit_rate=0.45),
+        dict(step=2500, rollback=True),
+        dict(step=3000, eval_difficulty="Medium", eval_hit_rate=0.6),
+        dict(step=3100, rollback=True),
+    ]
+    p = tmp_path / "metrics.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in lines) + "\nnot json\n")
+    rec = reconstruct_from_metrics(p, up_to_step=2999)
+    assert rec == dict(best_hit_rate={"Easy": 0.8, "Medium": 0.45}, rollback_count=1)
+    assert reconstruct_from_metrics(tmp_path / "missing.jsonl", 10) == dict(best_hit_rate={}, rollback_count=0)
+
+
+def test_existing_run_dirs_matches_exact_name_only(tmp_path):
+    from train.bc import existing_run_dirs
+
+    for name in ("20260916_123616_bc_full_real", "20260916_222606_bc_full_real_v2", "20260917_010101_smoke_d32"):
+        (tmp_path / name).mkdir()
+    assert [d.name for d in existing_run_dirs("bc_full_real_v2", tmp_path)] == ["20260916_222606_bc_full_real_v2"]
+    assert [d.name for d in existing_run_dirs("bc_full_real", tmp_path)] == ["20260916_123616_bc_full_real"]
+    assert existing_run_dirs("resume_test_v2", tmp_path) == []

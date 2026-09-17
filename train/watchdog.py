@@ -159,3 +159,56 @@ class GradWatchdog:
 
     def exhausted(self) -> bool:
         return self.rollback_count >= self.max_rollbacks
+
+    def state_dict(self) -> dict:
+        """Runtime state saved into every checkpoint (D33) so a stop/resume
+        doesn't forget rollbacks already spent, the frozen healthy baseline,
+        or the best hit_rate. (The halved brain LR needs no entry here: it
+        lives in the optimizer's param_groups, which the checkpoint already
+        saves and --resume already restores.)"""
+        return dict(
+            recent=list(self._recent), healthy_baseline=self.healthy_baseline,
+            consecutive_bad_steps=self.consecutive_bad_steps, rollback_count=self.rollback_count,
+            skip_count=self.skip_count, total_steps=self.total_steps,
+            best_hit_rate=dict(self.best_hit_rate), consecutive_bad_evals=dict(self.consecutive_bad_evals),
+        )
+
+    def load_state_dict(self, state: dict) -> None:
+        self._recent = deque(state["recent"], maxlen=self.window)
+        self.healthy_baseline = state["healthy_baseline"]
+        self.consecutive_bad_steps = state["consecutive_bad_steps"]
+        self.rollback_count = state["rollback_count"]
+        self.skip_count = state["skip_count"]
+        self.total_steps = state["total_steps"]
+        self.best_hit_rate = dict(state["best_hit_rate"])
+        self.consecutive_bad_evals = dict(state["consecutive_bad_evals"])
+
+
+def reconstruct_from_metrics(metrics_path, up_to_step: int) -> dict:
+    """Fallback for checkpoints written before D33 (no watchdog_state):
+    recovers what metrics.jsonl does record -- best eval hit_rate per
+    difficulty and the rollback count -- for records at steps <= up_to_step.
+    The rolling window/baseline can't be recovered (only every 10th step is
+    logged) and are re-established from scratch. Returns
+    {"best_hit_rate": {...}, "rollback_count": int}."""
+    import json
+    from pathlib import Path
+
+    best: dict = {}
+    rollbacks = 0
+    path = Path(metrics_path)
+    if path.exists():
+        for line in path.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("step", 0) > up_to_step:
+                continue
+            if "eval_hit_rate" in r:
+                d = r.get("eval_difficulty")
+                if d is not None and r["eval_hit_rate"] > best.get(d, float("-inf")):
+                    best[d] = r["eval_hit_rate"]
+            if r.get("rollback"):
+                rollbacks += 1
+    return dict(best_hit_rate=best, rollback_count=rollbacks)

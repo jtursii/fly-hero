@@ -40,7 +40,7 @@ from flyhero.game.sim import VecRhythmEnv
 from flyhero.utils.config import load_config
 from flyhero.utils.run import make_run_dir
 from train.common import build_eval_clip, build_val_set, estimate_strum_pos_weight, make_training_clip
-from train.watchdog import GradWatchdog
+from train.watchdog import GradWatchdog, reconstruct_from_metrics
 
 _stop_requested = False
 _stop_signal_name: str | None = None
@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-time-s", type=float, default=None)
     p.add_argument("--fixed-difficulty", default=None, help="disable curriculum, train/eval only this difficulty")
     p.add_argument("--gradient-checkpointing", action="store_true", default=None)
+    p.add_argument(
+        "--debug-inject-rollback-at-step", type=int, default=None,
+        help="TEST ONLY (D33): force one watchdog rollback (reason=injected_test) right after this step, to "
+        "verify watchdog state survives stop/resume. Never use on a real run.",
+    )
     args = p.parse_args()
     if args.resume == "latest":
         if not args.run_dir:
@@ -86,6 +91,15 @@ def parse_args() -> argparse.Namespace:
     if args.resume and args.init_from:
         p.error("--resume and --init-from are mutually exclusive")
     return args
+
+
+def existing_run_dirs(run_name: str, runs_root: Path = Path("runs")) -> list[Path]:
+    """Run dirs named exactly <YYYYMMDD_HHMMSS>_<run_name> (not prefixes of
+    longer names, e.g. bc_full_real vs bc_full_real_v2)."""
+    import re
+
+    pat = re.compile(r"^\d{8}_\d{6}_" + re.escape(run_name) + r"$")
+    return sorted(d for d in runs_root.glob(f"*_{run_name}") if d.is_dir() and pat.match(d.name))
 
 
 def build_policy(model_kind: str, cfg_bc: dict, cfg_game: dict, cfg_brain: dict, photo_map, device, dtype):
@@ -302,6 +316,18 @@ def write_stopped_file(run_dir: Path, reason: str, step: int) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.init_from:
+        # D33 guard: re-forking an existing run name (e.g. bc_full_real_v2
+        # from backups/checkpoint_step13000.pt again) would silently throw
+        # away everything that run trained past the fork point. Continuing a
+        # run is --resume latest --run-dir <dir>.
+        run_name_guard = args.run_name or f"bc_{args.model}"
+        clash = existing_run_dirs(run_name_guard)
+        if clash:
+            raise SystemExit(
+                f"--init-from refused: run name {run_name_guard!r} already exists ({clash[-1]}). "
+                f"To continue it use: --resume latest --run-dir {clash[-1]}"
+            )
     cfg_bc = load_config(args.config)
     cfg_game = load_config(args.game_config)
     cfg_brain = load_config(args.brain_config) if args.model == "connectome" else {}
@@ -328,12 +354,13 @@ def main() -> None:
             {"params": list(policy.non_readout_parameters()), "lr": cfg_bc["lr_brain"]},
         ]
     )
-    # D30 (docs/DECISIONS.md): overnight-stability watchdog + the magnitude
-    # bound used by apply_gradient_step's outlier sanitization. Watchdog
-    # state is not persisted across --resume (a fresh run re-establishes its
-    # rolling baseline over the next `window` steps) -- acceptable since
-    # it's a runtime safeguard, not training state that affects the model.
-    watchdog = GradWatchdog()
+    # D30/D31 (docs/DECISIONS.md): overnight-stability watchdog + the
+    # magnitude bound used by apply_gradient_step's outlier sanitization.
+    # D33: watchdog state is saved in every checkpoint and restored on
+    # --resume (rollback count, baseline, best hit_rate); the halved brain
+    # LR rides along in the optimizer state. Thresholds can be overridden
+    # via an optional `watchdog:` config section (tests use a tiny window).
+    watchdog = GradWatchdog(**cfg_bc.get("watchdog", {}))
     grad_outlier_clip = float(cfg_bc.get("grad_outlier_clip", 10000.0))
 
     difficulties = [args.fixed_difficulty] if args.fixed_difficulty else cfg_bc["curriculum"]["difficulties"]
@@ -374,6 +401,18 @@ def main() -> None:
         rng.bit_generator.state = ckpt["numpy_rng_state"]
         torch.set_rng_state(ckpt["torch_rng_state"].cpu())
         print(f"resumed from {args.resume} at step={step} difficulty={difficulties[difficulty_idx]}")
+        if ckpt.get("watchdog_state") is not None:
+            watchdog.load_state_dict(ckpt["watchdog_state"])
+            src = "checkpoint"
+        else:
+            # pre-D33 checkpoint: recover what metrics.jsonl records.
+            rec = reconstruct_from_metrics(Path(args.resume).resolve().parent / "metrics.jsonl", step)
+            watchdog.best_hit_rate = rec["best_hit_rate"]
+            watchdog.rollback_count = rec["rollback_count"]
+            src = "metrics.jsonl (pre-D33 checkpoint; rolling window re-established from scratch)"
+        print(f"[watchdog] restored from {src}: rollback_count={watchdog.rollback_count} "
+              f"healthy_baseline={watchdog.healthy_baseline} window_len={len(watchdog._recent)} "
+              f"best_hit_rate={watchdog.best_hit_rate} lr_brain={optimizer.param_groups[1]['lr']:.3e}")
     elif args.init_from:
         # D30: fork a brand-new run from an arbitrary (e.g. backup)
         # checkpoint, unlike --resume which continues writing into the
@@ -389,6 +428,16 @@ def main() -> None:
         pos_weight = ckpt["pos_weight"]
         print(f"initialized from {args.init_from} at step={step} difficulty={difficulties[difficulty_idx]} "
               f"pos_weight={pos_weight:.3f} (fresh optimizer, fresh run dir)")
+        # D33: a fork keeps the lineage's best hit_rate (the eval-drop rule
+        # compares against it); rollback count and grad-norm baseline start
+        # fresh, since the fork has a fresh optimizer.
+        if ckpt.get("watchdog_state") is not None:
+            watchdog.best_hit_rate = dict(ckpt["watchdog_state"]["best_hit_rate"])
+        else:
+            watchdog.best_hit_rate = reconstruct_from_metrics(
+                Path(args.init_from).resolve().parent / "metrics.jsonl", step,
+            )["best_hit_rate"]
+        print(f"[watchdog] fork inherits best_hit_rate={watchdog.best_hit_rate}")
     else:
         pos_weight = estimate_strum_pos_weight(
             get_sampler(difficulties[difficulty_idx]), fps, hit_window_s, train_window_s, n_samples=200, rng=rng,
@@ -431,7 +480,10 @@ def main() -> None:
         path = run_dir / f"checkpoint_step{step}.pt"
         from train.common import save_checkpoint
 
-        save_checkpoint(path, policy, optimizer, step, difficulty_idx, pos_weight, rng, extra={"reason": reason})
+        save_checkpoint(
+            path, policy, optimizer, step, difficulty_idx, pos_weight, rng, extra={"reason": reason},
+            watchdog_state=watchdog.state_dict(),
+        )
         latest = run_dir / "checkpoint_latest.pt"
         if latest.exists() or latest.is_symlink():
             latest.unlink()
@@ -501,7 +553,7 @@ def main() -> None:
                           f"restored {healthy_path}, brain lr -> {optimizer.param_groups[1]['lr']:.2e}, optimizer moments reset")
                     with metrics_path.open("a") as f:
                         f.write(json.dumps(dict(
-                            step=step, rollback=True, rollback_n=watchdog.rollback_count,
+                            step=step, time=time.time(), rollback=True, rollback_n=watchdog.rollback_count,
                             rollback_reason="sustained_grad_elevation", restored_from=str(healthy_path),
                             new_lr_brain=optimizer.param_groups[1]["lr"],
                         )) + "\n")
@@ -512,10 +564,25 @@ def main() -> None:
                 else:
                     print("[watchdog] sustained elevation detected but no checkpoint_last_healthy.pt yet -- continuing")
 
+            if args.debug_inject_rollback_at_step is not None and step == args.debug_inject_rollback_at_step:
+                healthy_path = run_dir / "checkpoint_last_healthy.pt"
+                if not healthy_path.exists():
+                    do_checkpoint("pre_injected_rollback")
+                    healthy_path.symlink_to(f"checkpoint_step{step}.pt")
+                optimizer = perform_rollback(policy, optimizer, healthy_path, watchdog, device)
+                print(f"[watchdog] ROLLBACK #{watchdog.rollback_count} (injected_test): restored {healthy_path}, "
+                      f"brain lr -> {optimizer.param_groups[1]['lr']:.2e}")
+                with metrics_path.open("a") as f:
+                    f.write(json.dumps(dict(
+                        step=step, time=time.time(), rollback=True, rollback_n=watchdog.rollback_count,
+                        rollback_reason="injected_test", restored_from=str(healthy_path),
+                        new_lr_brain=optimizer.param_groups[1]["lr"],
+                    )) + "\n")
+
             if step % 10 == 0:
                 steps_per_s = len(step_times) / sum(step_times) if step_times else 0.0
                 record = dict(
-                    step=step, difficulty=difficulties[difficulty_idx],
+                    step=step, time=time.time(), difficulty=difficulties[difficulty_idx],
                     loss=float(loss.item()) if not is_nan_loss else float("nan"),
                     fret_loss=float(fret_loss.item()) if not is_nan_loss else float("nan"),
                     strum_loss=float(strum_loss.item()) if not is_nan_loss else float("nan"),
@@ -550,7 +617,7 @@ def main() -> None:
                 )
                 eval_wall_s = time.time() - eval_t0
                 record = dict(
-                    step=step, eval_difficulty=current_difficulty, eval_hit_rate=result["hit_rate"],
+                    step=step, time=time.time(), eval_difficulty=current_difficulty, eval_hit_rate=result["hit_rate"],
                     eval_overstrums_per_min=result["overstrums_per_min"], eval_n_songs=result["n_songs"],
                     eval_wall_s=eval_wall_s,
                 )
@@ -582,7 +649,7 @@ def main() -> None:
                               f"restored {healthy_path}, brain lr -> {optimizer.param_groups[1]['lr']:.2e}, optimizer moments reset")
                         with metrics_path.open("a") as f:
                             f.write(json.dumps(dict(
-                                step=step, rollback=True, rollback_n=watchdog.rollback_count,
+                                step=step, time=time.time(), rollback=True, rollback_n=watchdog.rollback_count,
                                 rollback_reason="eval_hit_rate_drop", restored_from=str(healthy_path),
                                 new_lr_brain=optimizer.param_groups[1]["lr"],
                             )) + "\n")
@@ -601,7 +668,7 @@ def main() -> None:
                     )
                     print(f"[curriculum] advanced to {new_difficulty}, new strum pos_weight={pos_weight:.3f}")
                     with metrics_path.open("a") as f:
-                        f.write(json.dumps(dict(step=step, curriculum_advanced_to=new_difficulty, new_pos_weight=pos_weight)) + "\n")
+                        f.write(json.dumps(dict(step=step, time=time.time(), curriculum_advanced_to=new_difficulty, new_pos_weight=pos_weight)) + "\n")
 
     except Exception as exc:
         print(f"[watchdog] CRASH: {exc!r}")
