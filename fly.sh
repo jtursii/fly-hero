@@ -74,6 +74,52 @@ for line in lines:
     print('step=%s difficulty=%s hit_rate=%.4f overstrums/min=%.1f' % (
         r.get('step'), r.get('eval_difficulty'), r.get('eval_hit_rate', 0), r.get('eval_overstrums_per_min', 0)))
 "
+      echo "--- watchdog (overnight safeguards, D30/D31) ---"
+      tail -n 2000 "$RUN/metrics.jsonl" | python3 -c "
+import json, sys
+last_train, rollbacks, best_by_diff = None, [], {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if 'rolling_median_grad_norm' in r:
+        last_train = r
+    if r.get('rollback'):
+        rollbacks.append(r)
+    if 'eval_hit_rate' in r:
+        d = r.get('eval_difficulty')
+        if d is not None and r['eval_hit_rate'] > best_by_diff.get(d, (-1, None))[0]:
+            best_by_diff[d] = (r['eval_hit_rate'], r.get('step'))
+
+if last_train:
+    median = last_train.get('rolling_median_grad_norm')
+    print('rolling median grad_norm (last %d steps): %s' % (200, ('%.3f' % median) if median is not None else 'n/a (warming up)'))
+    print('skip rate (cumulative): %.3f%%  rollback count: %s' % (
+        100 * last_train.get('watchdog_skip_rate', 0), last_train.get('rollback_count', 0)))
+else:
+    print('no training records yet')
+for d, (hr, step) in best_by_diff.items():
+    print('best hit_rate @ %s: %.4f (step %s)' % (d, hr, step))
+if rollbacks:
+    print('rollback events:')
+    for r in rollbacks:
+        print('  step=%s reason=%s new_lr_brain=%.2e restored_from=%s' % (
+            r.get('step'), r.get('rollback_reason'), r.get('new_lr_brain', 0), r.get('restored_from')))
+"
+    fi
+
+    if [ -f "$RUN/STOPPED.txt" ]; then
+      echo "🛑 STOPPED.txt present:"
+      cat "$RUN/STOPPED.txt"
+    fi
+
+    FREE_GB=$(df -g . 2>/dev/null | tail -1 | awk '{print $4}')
+    if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt 20 ]; then
+      echo "⚠️  low disk space: ${FREE_GB}GB free (<20GB)"
     fi
     ;;
   awake)

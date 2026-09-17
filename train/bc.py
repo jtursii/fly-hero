@@ -40,6 +40,7 @@ from flyhero.game.sim import VecRhythmEnv
 from flyhero.utils.config import load_config
 from flyhero.utils.run import make_run_dir
 from train.common import build_eval_clip, build_val_set, estimate_strum_pos_weight, make_training_clip
+from train.watchdog import GradWatchdog
 
 _stop_requested = False
 _stop_signal_name: str | None = None
@@ -64,6 +65,13 @@ def parse_args() -> argparse.Namespace:
         "<run-dir>/checkpoint_latest.pt",
     )
     p.add_argument("--run-dir", default=None, help="required when --resume latest is used")
+    p.add_argument(
+        "--init-from", default=None,
+        help="seed model/optimizer/step/difficulty/pos_weight from this checkpoint file, but start a "
+        "brand-new run dir (unlike --resume, which continues writing into the checkpoint's own run "
+        "dir) -- e.g. forking a new run from a backup checkpoint while leaving the original run dir "
+        "untouched. Mutually exclusive with --resume.",
+    )
     p.add_argument("--device", default="mps")
     p.add_argument("--dtype", default="float32")
     p.add_argument("--max-steps", type=int, default=None)
@@ -75,6 +83,8 @@ def parse_args() -> argparse.Namespace:
         if not args.run_dir:
             p.error("--resume latest requires --run-dir <path>")
         args.resume = str(Path(args.run_dir) / "checkpoint_latest.pt")
+    if args.resume and args.init_from:
+        p.error("--resume and --init-from are mutually exclusive")
     return args
 
 
@@ -198,6 +208,98 @@ def evaluate_difficulty(
     )
 
 
+def apply_gradient_step(
+    policy, optimizer, loss: torch.Tensor, grad_clip_norm: float, grad_outlier_clip: float, watchdog: GradWatchdog,
+) -> dict:
+    """Backward pass + NaN/outlier-safe gradient sanitization (D28, D30) +
+    per-parameter-group clipping + the GradWatchdog skip decision --
+    extracted from the training loop so it's unit-testable without any
+    connectome/game data (tests/test_watchdog.py). Mutates policy's
+    gradients, and (unless the step is skipped) its parameters via
+    optimizer.step(). Assumes the fixed 2-group [readout, brain] optimizer
+    layout built in main()/tests.
+
+    D30 (docs/DECISIONS.md): offline diagnosis (scripts/
+    diagnose_grad_explosion.py) found the known-unstable
+    photoreceptor<->lamina pathway (R7, R8, L1, L5, one 2-neuron type;
+    D28) passes through a *finite-but-astronomically-large*
+    (1e5-1e14+) gradient regime before it literally overflows to inf --
+    torch.nan_to_num alone doesn't catch that, and a single such entry
+    dominates clip_grad_norm_'s combined norm, crushing every other
+    parameter's real gradient to near zero on that step. Fixed here with:
+    (1) an element-wise magnitude clamp in addition to non-finite zeroing,
+    (2) separate clip_grad_norm_ calls for the readout vs. brain parameter
+    groups (a brain-side blowup can no longer starve the readout), and
+    (3) skipping the optimizer step entirely (via `watchdog`) when
+    sanitization touched far more than the known pathway's entries, or the
+    post-sanitize brain grad_norm is way above the recent rolling median."""
+    is_nan_loss = bool(torch.isnan(loss).item())
+    if is_nan_loss:
+        optimizer.zero_grad()
+        should_skip, skip_reason = watchdog.record_step(float("nan"), 0)
+        return dict(
+            is_nan_loss=True, n_bad_elems=0, grad_norm_brain=float("nan"), grad_norm_readout=float("nan"),
+            should_skip=should_skip, skip_reason=skip_reason,
+        )
+
+    optimizer.zero_grad()
+    loss.backward()
+    readout_params = list(policy.readout_parameters())
+    brain_params = list(policy.non_readout_parameters())
+    n_bad_elems = 0
+    for p in readout_params + brain_params:
+        if p.grad is None:
+            continue
+        bad = ~torch.isfinite(p.grad)
+        n_bad = int(bad.sum().item())
+        if n_bad:
+            n_bad_elems += n_bad
+            p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        outlier = p.grad.abs() > grad_outlier_clip
+        n_outlier = int(outlier.sum().item())
+        if n_outlier:
+            n_bad_elems += n_outlier
+            p.grad = torch.clamp(p.grad, min=-grad_outlier_clip, max=grad_outlier_clip)
+
+    grad_norm_readout = torch.nn.utils.clip_grad_norm_(readout_params, grad_clip_norm)
+    grad_norm_brain = torch.nn.utils.clip_grad_norm_(brain_params, grad_clip_norm)
+    should_skip, skip_reason = watchdog.record_step(float(grad_norm_brain.item()), n_bad_elems)
+    if should_skip:
+        optimizer.zero_grad()
+    else:
+        optimizer.step()
+        optimizer.zero_grad()
+    return dict(
+        is_nan_loss=False, n_bad_elems=n_bad_elems,
+        grad_norm_brain=float(grad_norm_brain.item()), grad_norm_readout=float(grad_norm_readout.item()),
+        should_skip=should_skip, skip_reason=skip_reason,
+    )
+
+
+def perform_rollback(policy, optimizer: torch.optim.Optimizer, healthy_checkpoint_path: Path, watchdog: GradWatchdog, device) -> torch.optim.Optimizer:
+    """Restores policy weights from healthy_checkpoint_path, halves the
+    brain parameter group's LR, and rebuilds the optimizer from scratch
+    (D30: Adam's moments may already be contaminated by the unhealthy
+    stretch, so they're not carried across a rollback). Returns the new
+    optimizer -- callers must rebind their local `optimizer` to it."""
+    ckpt = torch.load(healthy_checkpoint_path, map_location=device)
+    policy.load_state_dict(ckpt["model_state"])
+    lr_readout = optimizer.param_groups[0]["lr"]
+    lr_brain = optimizer.param_groups[1]["lr"] / 2.0
+    new_optimizer = torch.optim.AdamW(
+        [
+            {"params": list(policy.readout_parameters()), "lr": lr_readout},
+            {"params": list(policy.non_readout_parameters()), "lr": lr_brain},
+        ]
+    )
+    watchdog.note_rollback()
+    return new_optimizer
+
+
+def write_stopped_file(run_dir: Path, reason: str, step: int) -> None:
+    (run_dir / "STOPPED.txt").write_text(f"stopped at step {step}: {reason}\n")
+
+
 def main() -> None:
     args = parse_args()
     cfg_bc = load_config(args.config)
@@ -226,6 +328,13 @@ def main() -> None:
             {"params": list(policy.non_readout_parameters()), "lr": cfg_bc["lr_brain"]},
         ]
     )
+    # D30 (docs/DECISIONS.md): overnight-stability watchdog + the magnitude
+    # bound used by apply_gradient_step's outlier sanitization. Watchdog
+    # state is not persisted across --resume (a fresh run re-establishes its
+    # rolling baseline over the next `window` steps) -- acceptable since
+    # it's a runtime safeguard, not training state that affects the model.
+    watchdog = GradWatchdog()
+    grad_outlier_clip = float(cfg_bc.get("grad_outlier_clip", 10000.0))
 
     difficulties = [args.fixed_difficulty] if args.fixed_difficulty else cfg_bc["curriculum"]["difficulties"]
     splits = json.loads((processed_dir / "splits.json").read_text())
@@ -265,6 +374,21 @@ def main() -> None:
         rng.bit_generator.state = ckpt["numpy_rng_state"]
         torch.set_rng_state(ckpt["torch_rng_state"].cpu())
         print(f"resumed from {args.resume} at step={step} difficulty={difficulties[difficulty_idx]}")
+    elif args.init_from:
+        # D30: fork a brand-new run from an arbitrary (e.g. backup)
+        # checkpoint, unlike --resume which continues writing into the
+        # checkpoint's own run dir. Optimizer state is intentionally NOT
+        # loaded here (see main()'s run-dir setup below) -- D30's diagnosis
+        # found the live gradient, not accumulated Adam state, was
+        # contaminated, but a fresh optimizer is also simply the right
+        # choice for "start a new run."
+        ckpt = torch.load(args.init_from, map_location=device)
+        policy.load_state_dict(ckpt["model_state"])
+        step = ckpt["step"]
+        difficulty_idx = ckpt["difficulty_idx"]
+        pos_weight = ckpt["pos_weight"]
+        print(f"initialized from {args.init_from} at step={step} difficulty={difficulties[difficulty_idx]} "
+              f"pos_weight={pos_weight:.3f} (fresh optimizer, fresh run dir)")
     else:
         pos_weight = estimate_strum_pos_weight(
             get_sampler(difficulties[difficulty_idx]), fps, hit_window_s, train_window_s, n_samples=200, rng=rng,
@@ -277,6 +401,9 @@ def main() -> None:
         # history across two directories.
         run_dir = Path(args.resume).resolve().parent
     else:
+        # Fresh run dir -- either a genuinely new run, or a --init-from fork
+        # (which needs its own dir precisely so the source checkpoint's run
+        # dir stays untouched).
         run_name = args.run_name or f"bc_{args.model}"
         run_dir = make_run_dir(run_name, args.config, seed)
         for extra_cfg in (args.game_config, args.brain_config) if args.model == "connectome" else (args.game_config,):
@@ -284,6 +411,8 @@ def main() -> None:
 
             shutil.copy(extra_cfg, run_dir / Path(extra_cfg).name)
         (run_dir / "model_kind.txt").write_text(args.model + "\n")
+        if args.init_from:
+            (run_dir / "init_from.txt").write_text(f"{args.init_from}\n")
     metrics_path = run_dir / "metrics.jsonl"
     tb_writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     print(f"run dir: {run_dir}")
@@ -310,139 +439,178 @@ def main() -> None:
         last_checkpoint_time = time.time()
         print(f"checkpoint saved: {path} (reason={reason})")
 
-    while True:
-        if args.max_steps is not None and step >= args.max_steps:
-            break
-        if args.max_time_s is not None and (time.time() - start_time) >= args.max_time_s:
-            break
-        if _stop_requested:
-            do_checkpoint(_stop_signal_name or "stop_signal")
-            break
+    try:
+        while True:
+            if args.max_steps is not None and step >= args.max_steps:
+                break
+            if args.max_time_s is not None and (time.time() - start_time) >= args.max_time_s:
+                break
+            if _stop_requested:
+                do_checkpoint(_stop_signal_name or "stop_signal")
+                break
 
-        t0 = time.time()
-        current_frac = 1.0 if args.fixed_difficulty else (1.0 - cfg_bc["curriculum"]["earlier_frac"])
-        clips, fret_bits_list, strum_list = [], [], []
-        for _ in range(batch_size):
-            d = choose_difficulty(rng, difficulties, difficulty_idx, current_frac)
-            clip, fret_bits, strum = make_training_clip(
-                get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng,
-            )
-            clips.append(clip)
-            fret_bits_list.append(fret_bits)
-            strum_list.append(strum)
-
-        fret_bits_t = torch.as_tensor(np.stack(fret_bits_list), device=device, dtype=dtype)
-        strum_t = torch.as_tensor(np.stack(strum_list), device=device, dtype=dtype)
-
-        _, logits_stack, max_abs_state = run_clip(
-            policy, env, clips, burn_in_frames, train_frames, device, dtype,
-            with_grad=True, gradient_checkpointing=gradient_checkpointing,
-        )
-        fret_loss = F.binary_cross_entropy_with_logits(logits_stack[..., :5], fret_bits_t)
-        strum_loss = F.binary_cross_entropy_with_logits(
-            logits_stack[..., 5], strum_t, pos_weight=torch.tensor(pos_weight, device=device, dtype=dtype),
-        )
-        loss = fret_loss + strum_loss
-
-        # NaN-safe gradient sanitization (user decision, docs/PROGRESS.md's
-        # 2026-09-16 smoke-test entry): backward() through the real
-        # connectome reliably produces NaN gradients for a handful of
-        # shared-per-cell-type parameters (found: R7, R8 photoreceptors, L1,
-        # L5, one 2-neuron type) -- a gradient-explosion-through-time effect
-        # in the 240-substep BPTT unroll, not a forward-pass bug (forward
-        # activity stays bounded throughout). Rather than skip the whole
-        # step (which was previously happening on ~100% of steps, i.e. zero
-        # training progress -- clip_grad_norm_'s combined norm propagates
-        # one NaN parameter into every parameter's effective gradient), NaN/
-        # Inf entries are zeroed in place right after backward(), before
-        # clipping: the ~9,023 unaffected cell types still get a real
-        # update every step; the ~5 affected types simply see no gradient on
-        # a step where their contribution was unstable (equivalent to "no
-        # signal this step" for just those parameters, not a corrupted
-        # update) and stay near their current value until a step where their
-        # gradient happens to be finite.
-        is_nan_loss = bool(torch.isnan(loss).item())
-        if not is_nan_loss:
-            optimizer.zero_grad()
-            loss.backward()
-            n_grad_elems, n_bad_elems = 0, 0
-            for p in list(policy.readout_parameters()) + list(policy.non_readout_parameters()):
-                if p.grad is None:
-                    continue
-                bad = ~torch.isfinite(p.grad)
-                n_bad = int(bad.sum().item())
-                if n_bad:
-                    n_bad_elems += n_bad
-                    p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
-                n_grad_elems += p.grad.numel()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                list(policy.readout_parameters()) + list(policy.non_readout_parameters()), cfg_bc["grad_clip_norm"],
-            )
-            optimizer.step()
-            optimizer.zero_grad()
-            is_nan = n_bad_elems > 0  # "step needed sanitization", not "step skipped" -- every step now updates
-        else:
-            is_nan = True
-            grad_norm = torch.tensor(float("nan"))
-        if is_nan:
-            nan_steps += 1
-
-        step_dt = time.time() - t0
-        step_times.append(step_dt)
-        window_steps += 1
-
-        step += 1
-        if step % 10 == 0:
-            steps_per_s = len(step_times) / sum(step_times) if step_times else 0.0
-            record = dict(
-                step=step, difficulty=difficulties[difficulty_idx],
-                loss=float(loss.item()) if not is_nan_loss else float("nan"),
-                fret_loss=float(fret_loss.item()) if not is_nan_loss else float("nan"),
-                strum_loss=float(strum_loss.item()) if not is_nan_loss else float("nan"),
-                grad_norm=float(grad_norm.item()), max_abs_state=max_abs_state,
-                nan_frac=nan_steps / window_steps, steps_per_s=steps_per_s, pos_weight=pos_weight,
-            )
-            with metrics_path.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-            for k, v in record.items():
-                if isinstance(v, (int, float)):
-                    tb_writer.add_scalar(k, v, step)
-            step_times = step_times[-50:]
-
-        if step % cfg_bc["checkpoint_interval_steps"] == 0 or (time.time() - last_checkpoint_time) >= cfg_bc["checkpoint_interval_s"]:
-            do_checkpoint("interval")
-
-        if step % cfg_bc["eval"]["interval_steps"] == 0:
-            eval_t0 = time.time()
-            current_difficulty = difficulties[difficulty_idx]
-            result = evaluate_difficulty(
-                policy, env, val_set[current_difficulty], burn_in_s, fps, hit_window_s, device, dtype,
-            )
-            eval_wall_s = time.time() - eval_t0
-            record = dict(
-                step=step, eval_difficulty=current_difficulty, eval_hit_rate=result["hit_rate"],
-                eval_overstrums_per_min=result["overstrums_per_min"], eval_n_songs=result["n_songs"],
-                eval_wall_s=eval_wall_s,
-            )
-            with metrics_path.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-            tb_writer.add_scalar("eval_hit_rate", result["hit_rate"], step)
-            tb_writer.add_scalar("eval_overstrums_per_min", result["overstrums_per_min"], step)
-            print(
-                f"[eval step={step}] difficulty={current_difficulty} hit_rate={result['hit_rate']:.4f} "
-                f"overstrums/min={result['overstrums_per_min']:.2f} wall={eval_wall_s:.1f}s"
-            )
-
-            if not args.fixed_difficulty and result["hit_rate"] >= cfg_bc["curriculum"]["advance_hit_rate"] and difficulty_idx < len(difficulties) - 1:
-                difficulty_idx += 1
-                new_difficulty = difficulties[difficulty_idx]
-                pos_weight = estimate_strum_pos_weight(
-                    get_sampler(new_difficulty), fps, hit_window_s, train_window_s, n_samples=200, rng=rng,
+            t0 = time.time()
+            current_frac = 1.0 if args.fixed_difficulty else (1.0 - cfg_bc["curriculum"]["earlier_frac"])
+            clips, fret_bits_list, strum_list = [], [], []
+            for _ in range(batch_size):
+                d = choose_difficulty(rng, difficulties, difficulty_idx, current_frac)
+                clip, fret_bits, strum = make_training_clip(
+                    get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng,
                 )
-                print(f"[curriculum] advanced to {new_difficulty}, new strum pos_weight={pos_weight:.3f}")
-                with metrics_path.open("a") as f:
-                    f.write(json.dumps(dict(step=step, curriculum_advanced_to=new_difficulty, new_pos_weight=pos_weight)) + "\n")
+                clips.append(clip)
+                fret_bits_list.append(fret_bits)
+                strum_list.append(strum)
 
+            fret_bits_t = torch.as_tensor(np.stack(fret_bits_list), device=device, dtype=dtype)
+            strum_t = torch.as_tensor(np.stack(strum_list), device=device, dtype=dtype)
+
+            _, logits_stack, max_abs_state = run_clip(
+                policy, env, clips, burn_in_frames, train_frames, device, dtype,
+                with_grad=True, gradient_checkpointing=gradient_checkpointing,
+            )
+            fret_loss = F.binary_cross_entropy_with_logits(logits_stack[..., :5], fret_bits_t)
+            strum_loss = F.binary_cross_entropy_with_logits(
+                logits_stack[..., 5], strum_t, pos_weight=torch.tensor(pos_weight, device=device, dtype=dtype),
+            )
+            loss = fret_loss + strum_loss
+
+            # NaN/outlier-safe gradient sanitization + per-group clipping +
+            # the skip decision (D28, strengthened by D30 -- see
+            # apply_gradient_step's docstring for the full mechanism).
+            step_result = apply_gradient_step(policy, optimizer, loss, cfg_bc["grad_clip_norm"], grad_outlier_clip, watchdog)
+            is_nan_loss = step_result["is_nan_loss"]
+            is_nan = step_result["n_bad_elems"] > 0 or is_nan_loss  # "step needed sanitization", distinct from "step skipped"
+            if is_nan:
+                nan_steps += 1
+
+            step_dt = time.time() - t0
+            step_times.append(step_dt)
+            window_steps += 1
+
+            step += 1
+
+            # Sustained-instability rollback check (overnight safeguards,
+            # D30/D31): every step, independent of the periodic-checkpoint/eval
+            # cadence below, since a runaway rolling median shouldn't have to
+            # wait for the next eval to be caught.
+            if watchdog.should_rollback_from_steps():
+                healthy_path = run_dir / "checkpoint_last_healthy.pt"
+                if healthy_path.exists():
+                    optimizer = perform_rollback(policy, optimizer, healthy_path, watchdog, device)
+                    print(f"[watchdog] ROLLBACK #{watchdog.rollback_count} (sustained_grad_elevation): "
+                          f"restored {healthy_path}, brain lr -> {optimizer.param_groups[1]['lr']:.2e}, optimizer moments reset")
+                    with metrics_path.open("a") as f:
+                        f.write(json.dumps(dict(
+                            step=step, rollback=True, rollback_n=watchdog.rollback_count,
+                            rollback_reason="sustained_grad_elevation", restored_from=str(healthy_path),
+                            new_lr_brain=optimizer.param_groups[1]["lr"],
+                        )) + "\n")
+                    if watchdog.exhausted():
+                        do_checkpoint("rollback_exhausted")
+                        write_stopped_file(run_dir, "3 rollbacks exhausted (last reason=sustained_grad_elevation)", step)
+                        break
+                else:
+                    print("[watchdog] sustained elevation detected but no checkpoint_last_healthy.pt yet -- continuing")
+
+            if step % 10 == 0:
+                steps_per_s = len(step_times) / sum(step_times) if step_times else 0.0
+                record = dict(
+                    step=step, difficulty=difficulties[difficulty_idx],
+                    loss=float(loss.item()) if not is_nan_loss else float("nan"),
+                    fret_loss=float(fret_loss.item()) if not is_nan_loss else float("nan"),
+                    strum_loss=float(strum_loss.item()) if not is_nan_loss else float("nan"),
+                    grad_norm=step_result["grad_norm_brain"], grad_norm_readout=step_result["grad_norm_readout"],
+                    max_abs_state=max_abs_state, n_bad_elems=step_result["n_bad_elems"],
+                    skip=step_result["should_skip"], skip_reason=step_result["skip_reason"],
+                    nan_frac=nan_steps / window_steps, steps_per_s=steps_per_s, pos_weight=pos_weight,
+                    rolling_median_grad_norm=watchdog.rolling_median(),
+                    watchdog_skip_rate=watchdog.skip_count / max(watchdog.total_steps, 1),
+                    rollback_count=watchdog.rollback_count,
+                )
+                with metrics_path.open("a") as f:
+                    f.write(json.dumps(record) + "\n")
+                for k, v in record.items():
+                    if isinstance(v, (int, float)):
+                        tb_writer.add_scalar(k, v, step)
+                step_times = step_times[-50:]
+
+            if step % cfg_bc["checkpoint_interval_steps"] == 0 or (time.time() - last_checkpoint_time) >= cfg_bc["checkpoint_interval_s"]:
+                do_checkpoint("interval")
+                if watchdog.is_healthy_now():
+                    healthy_path = run_dir / "checkpoint_last_healthy.pt"
+                    if healthy_path.exists() or healthy_path.is_symlink():
+                        healthy_path.unlink()
+                    healthy_path.symlink_to(f"checkpoint_step{step}.pt")
+
+            if step % cfg_bc["eval"]["interval_steps"] == 0:
+                eval_t0 = time.time()
+                current_difficulty = difficulties[difficulty_idx]
+                result = evaluate_difficulty(
+                    policy, env, val_set[current_difficulty], burn_in_s, fps, hit_window_s, device, dtype,
+                )
+                eval_wall_s = time.time() - eval_t0
+                record = dict(
+                    step=step, eval_difficulty=current_difficulty, eval_hit_rate=result["hit_rate"],
+                    eval_overstrums_per_min=result["overstrums_per_min"], eval_n_songs=result["n_songs"],
+                    eval_wall_s=eval_wall_s,
+                )
+                with metrics_path.open("a") as f:
+                    f.write(json.dumps(record) + "\n")
+                tb_writer.add_scalar("eval_hit_rate", result["hit_rate"], step)
+                tb_writer.add_scalar("eval_overstrums_per_min", result["overstrums_per_min"], step)
+                print(
+                    f"[eval step={step}] difficulty={current_difficulty} hit_rate={result['hit_rate']:.4f} "
+                    f"overstrums/min={result['overstrums_per_min']:.2f} wall={eval_wall_s:.1f}s"
+                )
+
+                # Overnight safeguards (D30/D31): track the best checkpoint at
+                # this difficulty, and roll back if hit_rate has cratered.
+                prev_best = watchdog.best_hit_rate.get(current_difficulty)
+                should_rollback_eval = watchdog.record_eval(current_difficulty, result["hit_rate"])
+                is_new_best = prev_best is None or result["hit_rate"] > prev_best
+                if is_new_best:
+                    best_path, ckpt_path = run_dir / "checkpoint_best.pt", run_dir / f"checkpoint_step{step}.pt"
+                    if ckpt_path.exists():
+                        if best_path.exists() or best_path.is_symlink():
+                            best_path.unlink()
+                        best_path.symlink_to(ckpt_path.name)
+                if should_rollback_eval:
+                    healthy_path = run_dir / "checkpoint_last_healthy.pt"
+                    if healthy_path.exists():
+                        optimizer = perform_rollback(policy, optimizer, healthy_path, watchdog, device)
+                        print(f"[watchdog] ROLLBACK #{watchdog.rollback_count} (eval_hit_rate_drop): "
+                              f"restored {healthy_path}, brain lr -> {optimizer.param_groups[1]['lr']:.2e}, optimizer moments reset")
+                        with metrics_path.open("a") as f:
+                            f.write(json.dumps(dict(
+                                step=step, rollback=True, rollback_n=watchdog.rollback_count,
+                                rollback_reason="eval_hit_rate_drop", restored_from=str(healthy_path),
+                                new_lr_brain=optimizer.param_groups[1]["lr"],
+                            )) + "\n")
+                        if watchdog.exhausted():
+                            do_checkpoint("rollback_exhausted")
+                            write_stopped_file(run_dir, "3 rollbacks exhausted (last reason=eval_hit_rate_drop)", step)
+                            break
+                    else:
+                        print("[watchdog] eval hit_rate drop detected but no checkpoint_last_healthy.pt yet -- continuing")
+
+                if not args.fixed_difficulty and result["hit_rate"] >= cfg_bc["curriculum"]["advance_hit_rate"] and difficulty_idx < len(difficulties) - 1:
+                    difficulty_idx += 1
+                    new_difficulty = difficulties[difficulty_idx]
+                    pos_weight = estimate_strum_pos_weight(
+                        get_sampler(new_difficulty), fps, hit_window_s, train_window_s, n_samples=200, rng=rng,
+                    )
+                    print(f"[curriculum] advanced to {new_difficulty}, new strum pos_weight={pos_weight:.3f}")
+                    with metrics_path.open("a") as f:
+                        f.write(json.dumps(dict(step=step, curriculum_advanced_to=new_difficulty, new_pos_weight=pos_weight)) + "\n")
+
+    except Exception as exc:
+        print(f"[watchdog] CRASH: {exc!r}")
+        try:
+            do_checkpoint("crash")
+        except Exception as ckpt_exc:
+            print(f"[watchdog] checkpoint-on-crash also failed: {ckpt_exc!r}")
+        write_stopped_file(run_dir, f"crash: {exc!r}", step)
+        raise
     do_checkpoint("final")
     tb_writer.close()
     print(f"done. total steps={step}, elapsed={time.time() - start_time:.1f}s, run dir={run_dir}")

@@ -15,6 +15,18 @@ lr_readout: 1.0e-3
 lr_brain: 1.0e-4
 grad_clip_norm: 1.0
 
+# D30 (docs/DECISIONS.md): offline diagnosis (scripts/diagnose_grad_explosion.py)
+# found the known-unstable photoreceptor<->lamina pathway (R7, R8, L1, L5,
+# one 2-neuron type; D28) passes through a finite-but-astronomically-large
+# (1e5-1e14+) gradient regime before literally overflowing to inf --
+# torch.nan_to_num alone doesn't catch that, and a single such entry
+# dominated clip_grad_norm_'s combined norm, crushing every other
+# parameter's real gradient to near zero on that step. Any |grad| entry
+# above this bound is clamped (in addition to non-finite zeroing) before
+# clipping. Chosen comfortably above any sane per-element gradient observed
+# on healthy real clips (~O(1-600)) and far below the pathological range.
+grad_outlier_clip: 10000.0
+
 # Note-aware clip sampling (user decision): 90% of clips have >=2 notes in
 # the 2s gradient window, 10% have 0 (blank-highway "don't strum" clips).
 # Burn-in may contain anything -- only the gradient window is classified.

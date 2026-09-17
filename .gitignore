@@ -1,6 +1,7 @@
 data/
 runs/
 media/
+backups/
 configs/paths.yaml
 web/node_modules/
 web/dist/
