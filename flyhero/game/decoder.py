@@ -24,15 +24,19 @@ from __future__ import annotations
 import numpy as np
 
 
-def decode_frets(fret_prob: np.ndarray) -> np.ndarray:
+FRET_THRESHOLD = 0.5
+STRUM_THRESHOLD = 0.5
+
+
+def decode_frets(fret_prob: np.ndarray, threshold: float = FRET_THRESHOLD) -> np.ndarray:
     """fret_prob: [F, 5] float in [0,1]. Returns bool[F, 5]."""
-    return fret_prob > 0.5
+    return fret_prob > threshold
 
 
-def decode_strum(strum_prob: np.ndarray) -> np.ndarray:
+def decode_strum(strum_prob: np.ndarray, threshold: float = STRUM_THRESHOLD) -> np.ndarray:
     """strum_prob: [F] float in [0,1]. Returns bool[F]: a strict local
     maximum (see module docstring for the plateau-tiebreak rule) with
-    value > 0.5."""
+    value > `threshold`."""
     n = len(strum_prob)
     if n == 0:
         return np.zeros(0, dtype=bool)
@@ -44,14 +48,21 @@ def decode_strum(strum_prob: np.ndarray) -> np.ndarray:
     right[:-1] = strum_prob[1:]
 
     is_peak = (strum_prob > left) & (strum_prob >= right)
-    return is_peak & (strum_prob > 0.5)
+    return is_peak & (strum_prob > threshold)
 
 
-def decode_trace(probs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def decode_trace(
+    probs: np.ndarray,
+    strum_threshold: float = STRUM_THRESHOLD,
+    fret_threshold: float = FRET_THRESHOLD,
+) -> tuple[np.ndarray, np.ndarray]:
     """probs: [F, 6] (5 fret probabilities + 1 strum probability), already
-    sigmoid-applied. Returns (frets[F,5] bool, strum[F] bool)."""
-    frets = decode_frets(probs[:, :5])
-    strum = decode_strum(probs[:, 5])
+    sigmoid-applied. Returns (frets[F,5] bool, strum[F] bool). The
+    thresholds default to the decoder's configured values (D27), so every
+    existing caller keeps the same behavior; eval/compare.py passes them
+    explicitly to sweep the decoder."""
+    frets = decode_frets(probs[:, :5], fret_threshold)
+    strum = decode_strum(probs[:, 5], strum_threshold)
     return frets, strum
 
 

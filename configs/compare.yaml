@@ -1,0 +1,25 @@
+# eval/compare.py -- paired val-set comparison of two checkpoints, broken
+# down by note category and failure mode. Model/game configs come from the
+# checkpoint's own run dir (its brain.yaml/game.yaml copies), like
+# eval/evaluate.py.
+processed_dir: "data/processed"
+
+# The val split (not test -- checkpoint selection must never see test data,
+# D38). n_songs is the cap passed to train.common.build_val_set; 30 yields
+# the 28 val songs that have Medium >= excerpt_s. The in-training eval
+# (D27) uses the first 10 of exactly this list, so --n-songs 10 reproduces
+# its number.
+difficulty: "Medium"
+n_songs: 30
+excerpt_s: 60.0
+
+# How many of those excerpts the in-training eval uses (D27's n_val_songs).
+# Only used to report that subset's mean alongside the full-set number, so
+# a run's logged hit_rate history stays comparable to this script's output.
+n_in_training_eval_songs: 10
+
+# Must match the training/in-training-eval burn-in so the brain enters the
+# excerpt in the same state the eval number was measured with.
+burn_in_s: 1.0
+
+seed: 0
