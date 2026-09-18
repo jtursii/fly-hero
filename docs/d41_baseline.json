@@ -1,0 +1,39 @@
+{
+ "note": "D41 reference, CPU probs (2026-09-17/18). 42000 = v2 checkpoint_step42000; 45000 = bc_trunc_bptt (D40) for contrast.",
+ "42000": {
+  "in_training_10": {
+   "single_fret_at_note": 0.921,
+   "far_overstrums_per_min": 6.8,
+   "hit_rate_first3s": 0.7303,
+   "hit_rate_after3s": 0.6959,
+   "single_nothing_held": 27,
+   "hit_rate_mean": 0.7256
+  },
+  "all_28": {
+   "single_fret_at_note": 0.9207,
+   "far_overstrums_per_min": 6.8929,
+   "hit_rate_first3s": 0.7336,
+   "hit_rate_after3s": 0.6882,
+   "single_nothing_held": 78,
+   "hit_rate_mean": 0.714
+  }
+ },
+ "45000": {
+  "in_training_10": {
+   "single_fret_at_note": 0.7149,
+   "far_overstrums_per_min": 19.0,
+   "hit_rate_first3s": 0.5393,
+   "hit_rate_after3s": 0.4559,
+   "single_nothing_held": 149,
+   "hit_rate_mean": 0.4647
+  },
+  "all_28": {
+   "single_fret_at_note": 0.7093,
+   "far_overstrums_per_min": 18.0,
+   "hit_rate_first3s": 0.61,
+   "hit_rate_after3s": 0.4602,
+   "single_nothing_held": 499,
+   "hit_rate_mean": 0.481
+  }
+ }
+}

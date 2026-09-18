@@ -4,11 +4,12 @@
 set -uo pipefail
 
 # Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real,
-# runs/<timestamp>_bc_full_real_vN or runs/<timestamp>_bc_trunc_bptt (D40),
+# runs/<timestamp>_bc_full_real_vN, runs/<timestamp>_bc_trunc_bptt (D40) or
+# runs/<timestamp>_bc_mid_labels (D41),
 # newest by the timestamp in its name
 # (not mtime, and never throwaway runs like smoke_d32/resume_test_v2).
 # Override with RUN=path/to/run ./fly.sh check
-RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_(bc_full_real(_v[0-9]+)?|bc_trunc_bptt)$' | sort -t/ -k2 | tail -n1)}"
+RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_(bc_full_real(_v[0-9]+)?|bc_trunc_bptt|bc_mid_labels)$' | sort -t/ -k2 | tail -n1)}"
 RUN="${RUN%/}"
 MODEL="${MODEL:-connectome}"
 # Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests,
@@ -192,7 +193,7 @@ if rollbacks:
     fi
 
     if [ -f "$RUN/metrics.jsonl" ] && grep -q '"drift_g_rel"\|"watch_R7_finite_frac"' "$RUN/metrics.jsonl"; then
-      echo "--- D40 pass criteria (fork of v2 @ 42000; reads at 44000 and 47000) ---"
+      echo "--- fork criteria vs v2 @ 42000 (D40/D41) ---"
       tail -n 3000 "$RUN/metrics.jsonl" | python3 -c "
 import json, sys
 W = ('R7', 'R8', 'L1', 'L5', 'AN_multi_1')
@@ -218,6 +219,20 @@ if ev:
     print('singles hit %.3f (42k %.3f)  extra_fret %s (42k %s)  no_strum %s (42k %s)  wrong_lane %s (42k %s)' % (
         ev.get('eval_single_hit_rate', 0), BASE['single_hit_rate'], ev.get('eval_single_extra_fret'), BASE['extra_fret'],
         ev.get('eval_single_no_strum'), BASE['no_strum'], ev.get('eval_single_wrong_lane'), BASE['wrong_lane']))
+"
+      tail -n 3000 "$RUN/metrics.jsonl" | python3 -c "
+import json, sys
+B = json.load(open('docs/d41_baseline.json'))
+b, f = B['42000']['in_training_10'], B['45000']['in_training_10']
+evs = [r for r in (json.loads(l) for l in sys.stdin if '\"eval_single_fret_at_note\"' in l)]
+if evs:
+    print('D41 per eval (10 excerpts; ref 42000 | D40 fork @45000):')
+    print('  step    hit   nothing_held  fret@note  far ovr/min  hit first3s/after')
+    for r in evs[-6:]:
+        print('  %-6s %.3f  %5s          %.3f      %5.1f        %.3f / %.3f' % (r['step'], r['eval_hit_rate'], r.get('eval_single_nothing_held'),
+              r['eval_single_fret_at_note'], r['eval_far_overstrums_per_min'], r['eval_hit_rate_first3s'], r['eval_hit_rate_after3s']))
+    print('  42000  %.3f  %5s          %.3f      %5.1f        %.3f / %.3f' % (b['hit_rate_mean'], b['single_nothing_held'], b['single_fret_at_note'], b['far_overstrums_per_min'], b['hit_rate_first3s'], b['hit_rate_after3s']))
+    print('  D40@45k %.3f %5s          %.3f      %5.1f        %.3f / %.3f' % (f['hit_rate_mean'], f['single_nothing_held'], f['single_fret_at_note'], f['far_overstrums_per_min'], f['hit_rate_first3s'], f['hit_rate_after3s']))
 "
       echo "paired 28-excerpt val Δ (CPU, background): ./fly.sh compare <step>"
     fi

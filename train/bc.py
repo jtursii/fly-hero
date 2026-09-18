@@ -258,9 +258,9 @@ def score_eval_entry(
 def evaluate_difficulty(
     policy, env: VecRhythmEnv, val_entries, burn_in_s: float, fps: int, hit_window_s: float, device, dtype,
 ) -> dict:
-    from eval.compare import CATEGORIES, MISS_MODES, analyze_excerpt  # lazy: eval.compare imports this module
+    from eval.compare import CATEGORIES, MISS_MODES, analyze_excerpt, pool_diag  # lazy: eval.compare imports this module
 
-    hit_rates, overstrums = [], []
+    hit_rates, overstrums, diags, minutes = [], [], [], 0.0
     by_cat = {c: dict(n=0, hits=0, miss_modes=dict.fromkeys(MISS_MODES, 0)) for c in CATEGORIES}
     for entry in val_entries:
         result = score_eval_entry(policy, env, entry, burn_in_s, fps, hit_window_s, device, dtype)
@@ -269,6 +269,8 @@ def evaluate_difficulty(
         # D39's failure-mode breakdown at the default decoder thresholds,
         # summed over excerpts (D40's per-eval single-note miss counters).
         a = analyze_excerpt(result["probs"], result["excerpt_notes"], fps, hit_window_s, STRUM_THRESHOLD, FRET_THRESHOLD)
+        diags.append(a["diag"])
+        minutes += a["minutes"]
         for c, d in a["by_category"].items():
             by_cat[c]["n"] += d["n"]
             by_cat[c]["hits"] += d["hits"]
@@ -277,7 +279,7 @@ def evaluate_difficulty(
     return dict(
         hit_rate=float(np.mean(hit_rates)) if hit_rates else 0.0,
         overstrums_per_min=float(np.mean(overstrums)) if overstrums else 0.0,
-        n_songs=len(val_entries), by_category=by_cat,
+        n_songs=len(val_entries), by_category=by_cat, diag=pool_diag(diags, minutes),
     )
 
 
@@ -485,7 +487,8 @@ def main() -> None:
     # D40 (bc_trunc_bptt): both default to the pre-D40 behavior when absent.
     tbptt_frames = cfg_bc.get("tbptt_frames")
     fret_label_onset = cfg_bc.get("fret_label_onset", "segment")
-    print(f"tbptt_frames={tbptt_frames} fret_label_onset={fret_label_onset}")
+    fret_label_onset_k = float(cfg_bc.get("fret_label_onset_k", 1.0))  # D41
+    print(f"tbptt_frames={tbptt_frames} fret_label_onset={fret_label_onset} fret_label_onset_k={fret_label_onset_k}")
 
     samplers: dict[str, ClipSampler] = {}
 
@@ -676,7 +679,7 @@ def main() -> None:
             for _ in range(batch_size):
                 d = choose_difficulty(rng, difficulties, difficulty_idx, current_frac)
                 clip, fret_bits, strum = make_training_clip(
-                    get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng, fret_label_onset,
+                    get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng, fret_label_onset, fret_label_onset_k,
                 )
                 clips.append(clip)
                 fret_bits_list.append(fret_bits)
@@ -805,8 +808,9 @@ def main() -> None:
                 for cat, d in result["by_category"].items():
                     if d["n"]:
                         record[f"eval_{cat}_hit_rate"] = d["hits"] / d["n"]
-                        for m in ("extra_fret", "no_strum", "wrong_lane", "missing_fret"):
+                        for m in ("extra_fret", "no_strum", "wrong_lane", "missing_fret", "nothing_held"):
                             record[f"eval_{cat}_{m}"] = d["miss_modes"][m]
+                record.update({f"eval_{k}": v for k, v in result["diag"].items()})  # D41 decision-point diagnostics
                 if drift_ref is not None:
                     record.update(brain_drift_stats(policy, drift_ref, optimizer, watched))
                 with metrics_path.open("a") as f:

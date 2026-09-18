@@ -14,6 +14,7 @@ from eval.compare import (
     MISS_MODES,
     aggregate_condition,
     analyze_excerpt,
+    pool_diag,
     check_reproduces_in_training_eval,
     classify_miss,
     note_category,
@@ -230,3 +231,19 @@ def test_aggregate_condition_without_baseline_has_no_diffs():
              by_category={c: dict(n=0, hits=0, miss_modes=dict.fromkeys(MISS_MODES, 0)) for c in CATEGORIES})
     agg = aggregate_condition([e], None)
     assert "hit_rate_diff" not in agg and "diff" not in agg["by_category"]["single"]
+
+
+def test_analyze_excerpt_d41_diagnostics():
+    # singles at 1.0s (f60, lane 0, held + strummed -> hit), 2.0s (f120, lane 1,
+    # nothing held, strummed), 5.0s (f300, lane 2, held + strummed -> hit);
+    # plus a strum at 4.0s (f240) far from any note.
+    notes = make_notes([(1.0, 0b00001), (2.0, 0b00010), (5.0, 0b00100)])
+    probs = probs_from(n_frames=400, strum_frames=[60, 120, 240, 300], held={60: 0b00001, 300: 0b00100})
+    d = analyze_excerpt(probs, notes, FPS, HIT_WINDOW_S, 0.5, 0.5)["diag"]
+    assert d["single_n"] == 3 and d["single_fret_at_note"] == 2
+    assert d["far_overstrums"] == 1  # the f120 overstrum is next to a note (wrong frets), not far
+    assert (d["early_n"], d["early_hits"], d["late_n"], d["late_hits"]) == (2, 1, 1, 1)
+    p = pool_diag([d, d], minutes=2 * 400 / FPS / 60)
+    assert p["single_fret_at_note"] == pytest.approx(2 / 3)
+    assert p["hit_rate_first3s"] == pytest.approx(0.5) and p["hit_rate_after3s"] == pytest.approx(1.0)
+    assert p["far_overstrums_per_min"] == pytest.approx(2 / (800 / FPS / 60))

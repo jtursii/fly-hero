@@ -69,6 +69,7 @@ CATEGORIES = ("single", "chord2_adj", "chord2_nonadj", "chord3plus", "open")
 
 # Failure modes for a note that was not hit, judged at the decoded strum
 # frame nearest the note's time within +-hit_window_s.
+EARLY_S = 3.0  # D41: within-excerpt decay split (the training clip is 1 s burn-in + 2 s)
 MISS_MODES = ("no_strum", "nothing_held", "missing_fret", "extra_fret", "wrong_lane", "strum_consumed", "other")
 
 
@@ -174,6 +175,27 @@ def analyze_excerpt(
             modes[mode] += 1
         by_category[cat] = dict(n=len(sel), hits=int(hit[sel].sum()), miss_modes=modes)
 
+    # D41 decision-point diagnostics (counts, pooled by the callers):
+    # single notes whose own lane is held on the note's frame; overstrums
+    # with no note within +-hit_window_s (strums away from any note, as
+    # opposed to right-time strums with the wrong frets); hits split by
+    # time into the excerpt (< early_s vs after -- training clips are 3 s).
+    times = notes["time_s"].astype(np.float64)
+    single = np.flatnonzero(categories == "single")
+    note_frames = np.round(times[single] * fps).astype(np.int64)
+    in_range = note_frames < len(frets)
+    lanes = np.log2(notes["lane_mask"][single].astype(np.int64)).astype(np.int64)
+    fret_at_note = int(frets[note_frames[in_range], lanes[in_range]].sum())
+    far_overstrums = sum(
+        1 for e in events if e.kind == "overstrum" and (len(times) == 0 or np.min(np.abs(times - e.frame / fps)) > hit_window_s)
+    )
+    early = times < EARLY_S
+    diag = dict(
+        single_n=int(in_range.sum()), single_fret_at_note=fret_at_note, far_overstrums=int(far_overstrums),
+        early_n=int(early.sum()), early_hits=int(hit[early].sum()),
+        late_n=int((~early).sum()), late_hits=int(hit[~early].sum()),
+    )
+
     minutes = len(probs) / fps / 60.0
     # The playthrough score rules.py's reward weights imply (configs/game.yaml:
     # hit +1, miss -1, overstrum -0.3) -- the objective the 2026-09-17
@@ -183,7 +205,7 @@ def analyze_excerpt(
         hit_rate=metrics["hit_rate"], score=float(score), minutes=minutes,
         n_notes=metrics["n_notes"], n_hits=metrics["n_hits"], n_misses=metrics["n_misses"],
         n_overstrums=metrics["n_overstrums"], overstrums_per_min=metrics["overstrums_per_min"],
-        sustain_frac=metrics["sustain_frac"], by_category=by_category,
+        sustain_frac=metrics["sustain_frac"], by_category=by_category, diag=diag,
     )
 
 
@@ -197,6 +219,19 @@ def paired_diff(values: list[float], baseline: list[float]) -> dict:
         return dict(n=0, mean=None, se=None)
     se = float(np.std(d, ddof=1) / np.sqrt(n)) if n > 1 else 0.0
     return dict(n=n, mean=float(d.mean()), se=se)
+
+
+def pool_diag(diags: list[dict], minutes: float) -> dict:
+    """D41 decision-point rates from summed analyze_excerpt diag counts."""
+    if not diags:
+        return dict(single_fret_at_note=None, far_overstrums_per_min=None, hit_rate_first3s=None, hit_rate_after3s=None)
+    t = {k: sum(d[k] for d in diags) for k in diags[0]} if diags else {}
+    ratio = lambda a, b: t[a] / t[b] if t.get(b) else None
+    return dict(
+        single_fret_at_note=ratio("single_fret_at_note", "single_n"),
+        far_overstrums_per_min=t["far_overstrums"] / minutes if diags and minutes else None,
+        hit_rate_first3s=ratio("early_hits", "early_n"), hit_rate_after3s=ratio("late_hits", "late_n"),
+    )
 
 
 def aggregate_condition(per_excerpt: list[dict], baseline: list[dict] | None) -> dict:
@@ -216,6 +251,7 @@ def aggregate_condition(per_excerpt: list[dict], baseline: list[dict] | None) ->
         score_total=float(sum(r["score"] for r in per_excerpt)),
         overstrums_per_min_pooled=sum(r["n_overstrums"] for r in per_excerpt) / minutes if minutes else 0.0,
         n_notes=n_notes, minutes=minutes,
+        diag=pool_diag([r["diag"] for r in per_excerpt if "diag" in r], minutes),
     )
 
     categories = {}
@@ -415,6 +451,10 @@ def print_report(out: dict, log=print) -> None:
         if agg.get("overstrums_per_min_diff"):
             ovr += f"  Δ {fmt_diff(agg['overstrums_per_min_diff'], 0, places=1)}"
         log(f"{'overstrums':<15}{'':>8}{ovr}")
+        fmt = lambda d: "n/a" if d["single_fret_at_note"] is None else (f"fret-at-note {d['single_fret_at_note']:.3f}  far overstrums {d['far_overstrums_per_min']:.1f}/min  "
+                         f"hit first 3s {d['hit_rate_first3s']:.3f} / after {d['hit_rate_after3s']:.3f}")
+        log(f"{'D41 diag':<15}{'':>8}cond: {fmt(agg['diag'])}")
+        log(f"{'':<15}{'':>8}base: {fmt(b['aggregate']['diag'])}")
 
 
 def main() -> None:

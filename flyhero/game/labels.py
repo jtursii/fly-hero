@@ -29,6 +29,10 @@ the hold starts:
     time rules.py can reward the held frets (PLAN Phase 2 task 7's own
     wording). The end of the hold and the segment partition are unchanged,
     so the scripted perfect player's exactness argument still holds.
+    `fret_onset_k` (D41, default 1.0 = D40's behavior) widens this to
+    max(seg_start, time_s - k * hit_window_s): D40's k=1 left too little
+    margin for the model's onset jitter (nothing_held misses 78 -> 499);
+    bc_mid_labels uses k=2. Ignored for "segment".
 
 Strum label: 1 on the frame nearest each note's time_s. Two distinct notes
 must never round to the same frame -- should be impossible once notes have
@@ -50,6 +54,7 @@ FRET_ONSETS = ("segment", "hit_window")
 
 def compute_frame_labels(
     notes: np.ndarray, duration_s: float, fps: int, hit_window_s: float, fret_onset: str = "segment",
+    fret_onset_k: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Returns (fret_target[F] uint8 lane-mask-valued, strum[F] uint8) at
     `fps` Hz over [0, duration_s)."""
@@ -88,7 +93,7 @@ def compute_frame_labels(
     for i in range(n):
         seg_start = boundaries[i]
         if fret_onset == "hit_window":
-            seg_start = max(seg_start, times[i] - hit_window_s)
+            seg_start = max(seg_start, times[i] - fret_onset_k * hit_window_s)
         seg_end = boundaries[i + 1]
         hold_end = min(seg_end, times[i] + max(float(notes["sustain_s"][i]), hit_window_s))
 

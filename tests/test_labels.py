@@ -145,3 +145,22 @@ def test_hit_window_onset_dense_notes_fall_back_to_midpoint():
 def test_unknown_fret_onset_raises():
     with pytest.raises(ValueError):
         compute_frame_labels(_notes([(0.1, 1, 0.0, 0)]), 0.5, FPS, HIT_WINDOW_S, "bogus")
+
+
+def test_hit_window_onset_k_widens_onset_only():
+    # D41: k=2 starts the hold at t - 2*hit_window (still clipped at the
+    # midpoint); k=1 is D40's behavior; the hold end is unchanged.
+    notes = _notes([(0.5, 0b00001, 0.0, 0), (1.5, 0b00010, 0.0, 0)])
+    k1, _ = compute_frame_labels(notes, 2.0, FPS, HIT_WINDOW_S, "hit_window")
+    k1b, _ = compute_frame_labels(notes, 2.0, FPS, HIT_WINDOW_S, "hit_window", 1.0)
+    k2, _ = compute_frame_labels(notes, 2.0, FPS, HIT_WINDOW_S, "hit_window", 2.0)
+    assert np.array_equal(k1, k1b)
+    on = np.flatnonzero(k2 == 0b00010)
+    assert on[0] == int(np.ceil((1.5 - 2 * HIT_WINDOW_S) * FPS - 1e-9))
+    assert on[-1] == np.flatnonzero(k1 == 0b00010)[-1]
+    # 100ms gaps: the midpoint binds before t - 2*hit_window, same as "segment"
+    dense = _notes([(0.1 * i + 0.3, 1 << (i % 3), 0.0, 0) for i in range(6)])
+    seg, _ = compute_frame_labels(dense, 1.0, FPS, HIT_WINDOW_S, "segment")
+    mid, _ = compute_frame_labels(dense, 1.0, FPS, HIT_WINDOW_S, "hit_window", 2.0)
+    first = round((0.3 - 2 * HIT_WINDOW_S) * FPS)
+    assert np.array_equal(seg[first:], mid[first:])
