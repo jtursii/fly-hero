@@ -53,6 +53,31 @@ for line in sys.stdin:
 ' "$RUN_ABS"
 }
 
+# Battery protection (guard). Prints "<source> <pct>": source is battery,
+# ac, or unknown (no battery line, e.g. a desktop, or unparseable output);
+# pct is empty when unknown. PMSET_OUTPUT overrides the real
+# `pmset -g batt` text (tests / dry runs).
+BATTERY_STOP_PCT="${BATTERY_STOP_PCT:-5}"
+battery_state() {
+  local out src pct
+  out="${PMSET_OUTPUT-$(pmset -g batt 2>/dev/null)}"
+  case "$out" in
+    *"drawing from 'Battery Power'"*) src=battery ;;
+    *"drawing from 'AC Power'"*) src=ac ;;
+    *) src=unknown ;;
+  esac
+  pct=$(printf '%s\n' "$out" | grep -m1 'InternalBattery' | grep -oE '[0-9]+%' | head -n1 | tr -d '%')
+  [ -z "$pct" ] && src=unknown
+  echo "$src $pct"
+}
+# Exit 0 = stop now: on battery power at or below BATTERY_STOP_PCT. Never on
+# AC, at any level, and never when the state can't be read.
+battery_should_stop() {
+  local src pct
+  read -r src pct <<< "$(battery_state)"
+  [ "$src" = battery ] && [ -n "$pct" ] && [ "$pct" -le "$BATTERY_STOP_PCT" ]
+}
+
 ckpt_step() {  # step number of checkpoint_<latest|best>.pt, from its target's file name
   readlink "$RUN/checkpoint_${1:-latest}.pt" 2>/dev/null | sed -E 's/^checkpoint_step([0-9]+)\.pt$/\1/'
 }
@@ -275,7 +300,9 @@ if ev:
     # log it to $RUN/guard.log. A STOPPED.txt from an exception ("crash:")
     # gets one auto-resume per night; watchdog exhaustion / user stops never. At most GUARD_MAX (default 3) auto-resumes
     # per night (logged in the last 12 h). Exits on STOPPED.txt,
-    # STOPPED_BY_USER, or the cap. --dry-run: only prints what it would do
+    # STOPPED_BY_USER, or the cap. Battery: on battery power at <=
+    # BATTERY_STOP_PCT (default 5) it runs `fly.sh stop` (checkpoint saved)
+    # and exits without resuming; never on AC. --dry-run: only prints what it would do
     # (never resumes, never writes guard.log). --once: one check, then exit.
     require_run
     shift
@@ -328,6 +355,20 @@ if ev:
             ;;
         esac
       fi
+      # Battery protection: on battery at <= BATTERY_STOP_PCT, stop cleanly
+      # (fly.sh stop: SIGTERM -> checkpoint, and STOPPED_BY_USER so nothing
+      # auto-resumes) and exit without resuming. Never on AC.
+      if battery_should_stop; then
+        read -r BSRC BPCT <<< "$(battery_state)"
+        glog "BATTERY-STOP: on battery at ${BPCT}% (<= ${BATTERY_STOP_PCT}%) -- clean stop, no auto-resume, guard exiting"
+        if [ "$DRY" = 1 ]; then
+          echo "[dry-run] would run: RUN=$RUN $0 stop$([ -z "$(find_pid)" ] && echo ' (nothing running)')"
+        elif [ -n "$(find_pid)" ]; then
+          OUT=$(RUN="$RUN" "$0" stop 2>&1); RC=$?
+          glog "stop exit=$RC: $(echo "$OUT" | grep -E '✅|⚠️|Nothing' | head -n1)"
+        fi
+        exit 0
+      fi
       PID=$(find_pid)
       if [ -n "$PID" ]; then
         echo "$(date '+%H:%M:%S') running (pid $PID)$([ "$DRY" = 1 ] && echo ' -- [dry-run] would do nothing')"
@@ -357,6 +398,12 @@ if ev:
     require_run
     tail -n 20 "$RUN/resume.log" 2>/dev/null || echo "No resume log yet."
     ;;
+  battery)
+    # Parsed `pmset -g batt` state and the guard's decision (read-only).
+    read -r BSRC BPCT <<< "$(battery_state)"
+    if battery_should_stop; then D="STOP (<= ${BATTERY_STOP_PCT}% on battery)"; else D="ok (threshold ${BATTERY_STOP_PCT}%, battery only)"; fi
+    echo "power: $BSRC  battery: ${BPCT:-n/a}%  guard decision: $D"
+    ;;
   compare)
     # D40: paired 28-excerpt Medium val Δ of $RUN's checkpoint_step<step>.pt
     # vs v2 @ 42000, both on CPU (MPS is nondeterministic, D39), background.
@@ -378,6 +425,7 @@ if ev:
     echo "./fly.sh guard [--dry-run] → auto-resume after a crash (own terminal window; max 3/night)"
     echo "./fly.sh video [song] [difficulty] → render a gameplay video at the current checkpoint's skill"
     echo "./fly.sh log             → last lines of the resume log"
+    echo "./fly.sh battery         → parsed pmset battery state + the guard's stop decision (BATTERY_STOP_PCT, default 5)"
     echo "./fly.sh compare <step>  → paired 28-excerpt val Δ vs v2 @ 42000, CPU, background (D40)"
     echo ""
     echo "RUN defaults to the newest runs/<timestamp>_{bc_full_real[_vN],bc_trunc_bptt} dir; override with RUN=path ./fly.sh ..."
