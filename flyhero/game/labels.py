@@ -18,6 +18,18 @@ covers any half-frame (<=1/120s) rounding slop. For the remainder of the
 segment (only reachable if the hold ends before the segment does), the
 target is 0 (release).
 
+`fret_onset` (2026-09-17, bc_trunc_bptt; see DECISIONS.md D40) picks where
+the hold starts:
+  - "segment" (default, every run before D40): at seg_start, i.e. the
+    midpoint from the previous note -- up to half the gap early (median
+    ~78 ms before the hit window on Medium), and from frame 0 for a clip's
+    first note. 34.6% of Medium training fret-positive frames lie outside
+    anything rules.py rewards.
+  - "hit_window": at max(seg_start, time_s - hit_window_s), the earliest
+    time rules.py can reward the held frets (PLAN Phase 2 task 7's own
+    wording). The end of the hold and the segment partition are unchanged,
+    so the scripted perfect player's exactness argument still holds.
+
 Strum label: 1 on the frame nearest each note's time_s. Two distinct notes
 must never round to the same frame -- should be impossible once notes have
 gone through song.py's load-time chord merge (merged notes are already
@@ -33,11 +45,16 @@ class DuplicateStrumFrameError(ValueError):
     pass
 
 
+FRET_ONSETS = ("segment", "hit_window")
+
+
 def compute_frame_labels(
-    notes: np.ndarray, duration_s: float, fps: int, hit_window_s: float
+    notes: np.ndarray, duration_s: float, fps: int, hit_window_s: float, fret_onset: str = "segment",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Returns (fret_target[F] uint8 lane-mask-valued, strum[F] uint8) at
     `fps` Hz over [0, duration_s)."""
+    if fret_onset not in FRET_ONSETS:
+        raise ValueError(f"fret_onset must be one of {FRET_ONSETS}, got {fret_onset!r}")
     n_frames = int(round(duration_s * fps))
     fret_target = np.zeros(n_frames, dtype=np.uint8)
     strum = np.zeros(n_frames, dtype=np.uint8)
@@ -70,6 +87,8 @@ def compute_frame_labels(
     eps = 1e-9
     for i in range(n):
         seg_start = boundaries[i]
+        if fret_onset == "hit_window":
+            seg_start = max(seg_start, times[i] - hit_window_s)
         seg_end = boundaries[i + 1]
         hold_end = min(seg_end, times[i] + max(float(notes["sustain_s"][i]), hit_window_s))
 

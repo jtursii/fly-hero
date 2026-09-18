@@ -25,12 +25,13 @@ def _notes(rows: list[tuple[float, int, float, int]]) -> np.ndarray:
     return arr
 
 
-def test_scripted_perfect_player_dense_trill():
+@pytest.mark.parametrize("fret_onset", ["segment", "hit_window"])
+def test_scripted_perfect_player_dense_trill(fret_onset):
     rows = [(0.05 * i, 1 if i % 2 == 0 else 2, 0.0, 0) for i in range(10)]
     notes = _notes(rows)
     duration_s = 0.6
 
-    held_seq, strum_seq = scripted_perfect_actions(notes, duration_s, FPS, HIT_WINDOW_S)
+    held_seq, strum_seq = scripted_perfect_actions(notes, duration_s, FPS, HIT_WINDOW_S, fret_onset)
     metrics, events = score_playthrough(notes, held_seq, strum_seq, FPS, HIT_WINDOW_S)
 
     assert metrics["hit_rate"] == pytest.approx(1.0)
@@ -143,7 +144,8 @@ def _densest_val_song_path() -> Path | None:
     return best_path
 
 
-def test_scripted_perfect_player_on_densest_real_val_song():
+@pytest.mark.parametrize("fret_onset", ["segment", "hit_window"])
+def test_scripted_perfect_player_on_densest_real_val_song(fret_onset):
     """If this fails, fix labels.py, never loosen rules.py -- this is the
     direct stress test for the earliest-unhit-note tie-break and the
     max(sustain_s, hit_window_s) label hold-duration floor under real,
@@ -159,7 +161,7 @@ def test_scripted_perfect_player_on_densest_real_val_song():
     song = load_song_merged(song_path, cfg["chord_merge_min_gap_s"])
 
     held_seq, strum_seq = scripted_perfect_actions(
-        song.notes, song.duration_s, cfg["fps"], cfg["hit_window_s"]
+        song.notes, song.duration_s, cfg["fps"], cfg["hit_window_s"], fret_onset
     )
     metrics, _events = score_playthrough(
         song.notes, held_seq, strum_seq, cfg["fps"], cfg["hit_window_s"],

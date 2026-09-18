@@ -293,3 +293,48 @@ def test_resume_best_resolves_and_reuses_recorded_config(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["bc", "--set-lr-brain", "1e-5"])
     with pytest.raises(SystemExit):
         parse_args()
+
+
+def test_run_clip_tbptt_same_forward_gradient_truncated():
+    """D40: tbptt_frames detaches the carried state every k gradient-window
+    frames. Forward logits are unchanged; the gradient of frame t's output
+    equals the one from a manual replay that starts tracking at the last
+    detach point before t (and differs from full BPTT)."""
+    torch.manual_seed(0)
+    frame_size = 8
+    policy = GRUBaseline(frame_size=frame_size, cnn_out_dim=16, gru_hidden=12)
+    device, dtype = torch.device("cpu"), torch.float32
+    clips = [object(), object()]
+    burn_in, train, k, t = 3, 6, 2, 3
+
+    def grads(loss):
+        policy.zero_grad()
+        loss.backward()
+        return [p.grad.clone() for p in policy.parameters()]
+
+    _, logits_full, _ = run_clip(policy, FakeEnv(frame_size), clips, burn_in, train, device, dtype,
+                                 with_grad=True, gradient_checkpointing=False)
+    g_full = grads(logits_full[:, t].sum())
+    _, logits_tr, _ = run_clip(policy, FakeEnv(frame_size), clips, burn_in, train, device, dtype,
+                               with_grad=True, gradient_checkpointing=False, tbptt_frames=k)
+    g_tr = grads(logits_tr[:, t].sum())
+    torch.testing.assert_close(logits_tr, logits_full)
+
+    # Manual: frames before the last detach point (t // k * k) without grad.
+    env = FakeEnv(frame_size)
+    env.reset(clips)
+    policy.reset_stream(len(clips))
+    state = policy.init_state(len(clips), device, dtype)
+    start = t // k * k
+    with torch.no_grad():
+        for _ in range(burn_in + start):
+            obs, _, _, _ = env.step(None)
+            state, _ = policy.step_frame(state, torch.from_numpy(obs["frame"]))
+    for _ in range(t - start + 1):
+        obs, _, _, _ = env.step(None)
+        state, logits = policy.step_frame(state, torch.from_numpy(obs["frame"]))
+    g_manual = grads(logits.sum())
+
+    for a, b in zip(g_tr, g_manual):
+        torch.testing.assert_close(a, b)
+    assert any(not torch.allclose(a, b) for a, b in zip(g_tr, g_full))

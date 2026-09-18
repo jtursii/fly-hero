@@ -111,7 +111,7 @@ def estimate_strum_pos_weight(
 
 def make_training_clip(
     sampler: ClipSampler, burn_in_s: float, train_window_s: float, fps: int, hit_window_s: float,
-    rng: np.random.Generator,
+    rng: np.random.Generator, fret_onset: str = "segment",
 ) -> tuple[Song, np.ndarray, np.ndarray]:
     """Draws one (song, start_time) from `sampler` and returns
     (burn_in_plus_window_song, fret_bits[T,5], strum[T]) where T =
@@ -121,7 +121,7 @@ def make_training_clip(
     window_start = start_s - burn_in_s
     clip = slice_song(song, window_start, burn_in_s + train_window_s)
     grad_only = slice_song(clip, burn_in_s, train_window_s)
-    fret_target, strum = compute_frame_labels(grad_only.notes, train_window_s, fps, hit_window_s)
+    fret_target, strum = compute_frame_labels(grad_only.notes, train_window_s, fps, hit_window_s, fret_onset)
     return clip, unpack_fret_targets(fret_target), strum.astype(np.float32)
 
 

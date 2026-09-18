@@ -199,7 +199,7 @@ def max_simultaneous_open_windows(notes: np.ndarray, hit_window_s: float) -> int
 
 
 def scripted_perfect_actions(
-    notes: np.ndarray, duration_s: float, fps: int, hit_window_s: float
+    notes: np.ndarray, duration_s: float, fps: int, hit_window_s: float, fret_onset: str = "segment",
 ) -> tuple[np.ndarray, np.ndarray]:
     """A scripted "perfect player" that plays exactly the labels.py targets:
     held frets = fret_target, strum = strum label. This is deliberate, not a
@@ -211,5 +211,5 @@ def scripted_perfect_actions(
     them correct for a perfect player in the first place (see labels.py's
     docstring on the max(sustain_s, hit_window_s) hold-duration floor), and
     it's the direct check that the label design is actually playable."""
-    fret_target, strum = compute_frame_labels(notes, duration_s, fps, hit_window_s)
+    fret_target, strum = compute_frame_labels(notes, duration_s, fps, hit_window_s, fret_onset)
     return fret_target.astype(np.int64), strum.astype(bool)

@@ -35,7 +35,7 @@ from flyhero.brain.policy import ConnectomeBrainPolicy
 from flyhero.brain.rate_model import ConnectomeBrain, load_graph_and_meta
 from flyhero.brain.readout import Readout
 from flyhero.game.clip_sampler import ClipSampler, list_available_song_ids
-from flyhero.game.decoder import decode_trace, frets_to_held_mask
+from flyhero.game.decoder import FRET_THRESHOLD, STRUM_THRESHOLD, decode_trace, frets_to_held_mask
 from flyhero.game.retina import build_photoreceptor_map
 from flyhero.game.retina_torch import TorchRetina
 from flyhero.game.rules import score_playthrough
@@ -172,10 +172,13 @@ def choose_difficulty(rng: np.random.Generator, difficulties: list[str], difficu
 
 def run_clip(
     policy, env: VecRhythmEnv, clips, burn_in_frames: int, train_frames: int, device, dtype,
-    with_grad: bool, gradient_checkpointing: bool,
+    with_grad: bool, gradient_checkpointing: bool, tbptt_frames: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, float]:
     """Runs burn_in_frames (always no_grad) then train_frames (with_grad
-    controls whether they build a graph). Returns (final_state,
+    controls whether they build a graph). tbptt_frames (D40): if set, the
+    carried state is detached every tbptt_frames frames of the gradient
+    window, so no gradient flows back further than that (truncated BPTT);
+    the forward pass and the loss are unchanged. Returns (final_state,
     logits_stack[B, train_frames, 6], max_abs_state_over_whole_clip) -- the
     last is the raw carried state's max magnitude (for ConnectomeBrain, this
     is literally max|v|; for GRUBaseline, the hidden state's max magnitude),
@@ -202,7 +205,9 @@ def run_clip(
     logits_list = []
     ctx = torch.enable_grad() if with_grad else torch.no_grad()
     with ctx:
-        for _ in range(train_frames):
+        for i in range(train_frames):
+            if tbptt_frames and i > 0 and i % tbptt_frames == 0:
+                state = state.detach()
             obs, _, _, _ = env.step(np.zeros((batch, 6), dtype=bool))
             frame_t = torch.from_numpy(obs["frame"]).to(device)
             if with_grad and gradient_checkpointing:
@@ -253,20 +258,32 @@ def score_eval_entry(
 def evaluate_difficulty(
     policy, env: VecRhythmEnv, val_entries, burn_in_s: float, fps: int, hit_window_s: float, device, dtype,
 ) -> dict:
+    from eval.compare import CATEGORIES, MISS_MODES, analyze_excerpt  # lazy: eval.compare imports this module
+
     hit_rates, overstrums = [], []
+    by_cat = {c: dict(n=0, hits=0, miss_modes=dict.fromkeys(MISS_MODES, 0)) for c in CATEGORIES}
     for entry in val_entries:
         result = score_eval_entry(policy, env, entry, burn_in_s, fps, hit_window_s, device, dtype)
         hit_rates.append(result["metrics"]["hit_rate"])
         overstrums.append(result["metrics"]["overstrums_per_min"])
+        # D39's failure-mode breakdown at the default decoder thresholds,
+        # summed over excerpts (D40's per-eval single-note miss counters).
+        a = analyze_excerpt(result["probs"], result["excerpt_notes"], fps, hit_window_s, STRUM_THRESHOLD, FRET_THRESHOLD)
+        for c, d in a["by_category"].items():
+            by_cat[c]["n"] += d["n"]
+            by_cat[c]["hits"] += d["hits"]
+            for m, k in d["miss_modes"].items():
+                by_cat[c]["miss_modes"][m] += k
     return dict(
         hit_rate=float(np.mean(hit_rates)) if hit_rates else 0.0,
         overstrums_per_min=float(np.mean(overstrums)) if overstrums else 0.0,
-        n_songs=len(val_entries),
+        n_songs=len(val_entries), by_category=by_cat,
     )
 
 
 def apply_gradient_step(
     policy, optimizer, loss: torch.Tensor, grad_clip_norm: float, grad_outlier_clip: float, watchdog: GradWatchdog,
+    probe_type_idx: torch.Tensor | None = None,
 ) -> dict:
     """Backward pass + NaN/outlier-safe gradient sanitization (D28, D30) +
     per-parameter-group clipping + the GradWatchdog skip decision --
@@ -289,7 +306,12 @@ def apply_gradient_step(
     groups (a brain-side blowup can no longer starve the readout), and
     (3) skipping the optimizer step entirely (via `watchdog`) when
     sanitization touched far more than the known pathway's entries, or the
-    post-sanitize brain grad_norm is way above the recent rolling median."""
+    post-sanitize brain grad_norm is way above the recent rolling median.
+
+    probe_type_idx (D40): cell-type indices whose *raw* (pre-sanitization)
+    tau/bias gradient magnitude is returned as `probe_raw_grad` [n] (max of
+    |d tau|, |d bias| per type; inf if either is non-finite) -- the direct
+    "does this type get a finite gradient" readout for R7/R8/L1/L5/AN_multi_1."""
     is_nan_loss = bool(torch.isnan(loss).item())
     if is_nan_loss:
         optimizer.zero_grad()
@@ -301,6 +323,15 @@ def apply_gradient_step(
 
     optimizer.zero_grad()
     loss.backward()
+    probe_raw_grad = None
+    if probe_type_idx is not None:
+        brain = policy.brain
+        g = torch.stack([
+            (brain.tau.grad if brain.tau.grad is not None else torch.zeros_like(brain.tau))[probe_type_idx],
+            (brain.bias.grad if brain.bias.grad is not None else torch.zeros_like(brain.bias))[probe_type_idx],
+        ]).detach().cpu().double().abs()  # [2, n]
+        g[~torch.isfinite(g)] = float("inf")
+        probe_raw_grad = g.max(dim=0).values.tolist()
     readout_params = list(policy.readout_parameters())
     brain_params = list(policy.non_readout_parameters())
     n_bad_elems = 0
@@ -329,8 +360,40 @@ def apply_gradient_step(
     return dict(
         is_nan_loss=False, n_bad_elems=n_bad_elems,
         grad_norm_brain=float(grad_norm_brain.item()), grad_norm_readout=float(grad_norm_readout.item()),
-        should_skip=should_skip, skip_reason=skip_reason,
+        should_skip=should_skip, skip_reason=skip_reason, probe_raw_grad=probe_raw_grad,
     )
+
+
+# D28/D30's unstable photoreceptor<->lamina pathway: never one finite
+# gradient under full-window BPTT (all-zero Adam moments in v2, D32).
+WATCHED_TYPES = ("R7", "R8", "L1", "L5", "AN_multi_1")
+
+
+def brain_drift_stats(policy, ref: dict, optimizer: torch.optim.Optimizer, watched: dict[str, int]) -> dict:
+    """D40 pass criteria, logged with each eval: how far the brain has moved
+    from `ref` (the fork's init checkpoint: brain.g/tau/bias tensors), and
+    whether the watched types have any Adam moment / have left their tau."""
+    brain = policy.brain
+    with torch.no_grad():
+        sg, sg0 = F.softplus(brain.g), F.softplus(ref["g"])  # [n_gain_groups]
+        out = dict(
+            drift_g_rel=float((sg - sg0).norm() / sg0.norm()),
+            drift_g_max_rel=float(((sg - sg0).abs() / sg0).max()),
+            drift_tau_rel=float((brain.tau - ref["tau"]).norm() / ref["tau"].norm()),
+            drift_bias_rel=float((brain.bias - ref["bias"]).norm() / ref["bias"].norm()),
+        )
+        idx = torch.tensor(list(watched.values()), device=brain.tau.device)
+        moments = []
+        for p in (brain.tau, brain.bias):
+            st = optimizer.state.get(p, {})
+            m = st.get("exp_avg")
+            moments.append(m[idx].abs() if m is not None else torch.zeros(len(idx), device=idx.device))
+        m = torch.stack(moments).max(dim=0).values.tolist()  # [n_watched]
+        tau = brain.tau[idx].tolist()
+        for (name, _), mi, ti in zip(watched.items(), m, tau):
+            out[f"watch_{name}_adam_m"] = mi
+            out[f"watch_{name}_tau"] = ti
+    return out
 
 
 def perform_rollback(policy, optimizer: torch.optim.Optimizer, healthy_checkpoint_path: Path, watchdog: GradWatchdog, device) -> torch.optim.Optimizer:
@@ -419,6 +482,10 @@ def main() -> None:
     gradient_checkpointing = (
         args.gradient_checkpointing if args.gradient_checkpointing is not None else cfg_bc["gradient_checkpointing"]
     )
+    # D40 (bc_trunc_bptt): both default to the pre-D40 behavior when absent.
+    tbptt_frames = cfg_bc.get("tbptt_frames")
+    fret_label_onset = cfg_bc.get("fret_label_onset", "segment")
+    print(f"tbptt_frames={tbptt_frames} fret_label_onset={fret_label_onset}")
 
     samplers: dict[str, ClipSampler] = {}
 
@@ -548,6 +615,22 @@ def main() -> None:
     tb_writer = SummaryWriter(log_dir=str(run_dir / "tb"))
     print(f"run dir: {run_dir}")
 
+    # D40: drift reference = the fork's init checkpoint (recorded in
+    # init_from.txt, so a --resume of the fork keeps the same reference),
+    # plus the watched unstable types' gradient probe.
+    drift_ref, watched, probe_idx = None, {}, None
+    if args.model == "connectome":
+        type_names = graph_meta["type_names"]
+        watched = {n: type_names.index(n) for n in WATCHED_TYPES if n in type_names}
+        probe_idx = torch.tensor(list(watched.values()), device=device)
+        ref_file = run_dir / "init_from.txt"
+        if ref_file.exists():
+            ref_state = torch.load(ref_file.read_text().strip(), map_location=device)["model_state"]
+            drift_ref = {k: ref_state[f"brain.{k}"].to(device=device, dtype=dtype) for k in ("g", "tau", "bias")}
+            print(f"[drift] reference: {ref_file.read_text().strip()}")
+    probe_finite = dict.fromkeys(watched, 0)
+    probe_steps = 0
+
     burn_in_frames = round(burn_in_s * fps)
     train_frames = round(train_window_s * fps)
 
@@ -593,7 +676,7 @@ def main() -> None:
             for _ in range(batch_size):
                 d = choose_difficulty(rng, difficulties, difficulty_idx, current_frac)
                 clip, fret_bits, strum = make_training_clip(
-                    get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng,
+                    get_sampler(d), burn_in_s, train_window_s, fps, hit_window_s, rng, fret_label_onset,
                 )
                 clips.append(clip)
                 fret_bits_list.append(fret_bits)
@@ -604,7 +687,7 @@ def main() -> None:
 
             _, logits_stack, max_abs_state = run_clip(
                 policy, env, clips, burn_in_frames, train_frames, device, dtype,
-                with_grad=True, gradient_checkpointing=gradient_checkpointing,
+                with_grad=True, gradient_checkpointing=gradient_checkpointing, tbptt_frames=tbptt_frames,
             )
             fret_loss = F.binary_cross_entropy_with_logits(logits_stack[..., :5], fret_bits_t)
             strum_loss = F.binary_cross_entropy_with_logits(
@@ -615,7 +698,13 @@ def main() -> None:
             # NaN/outlier-safe gradient sanitization + per-group clipping +
             # the skip decision (D28, strengthened by D30 -- see
             # apply_gradient_step's docstring for the full mechanism).
-            step_result = apply_gradient_step(policy, optimizer, loss, cfg_bc["grad_clip_norm"], grad_outlier_clip, watchdog)
+            step_result = apply_gradient_step(
+                policy, optimizer, loss, cfg_bc["grad_clip_norm"], grad_outlier_clip, watchdog, probe_idx,
+            )
+            if step_result.get("probe_raw_grad") is not None:
+                probe_steps += 1
+                for name, gmax in zip(watched, step_result["probe_raw_grad"]):
+                    probe_finite[name] += int(0.0 < gmax < float("inf"))
             is_nan_loss = step_result["is_nan_loss"]
             is_nan = step_result["n_bad_elems"] > 0 or is_nan_loss  # "step needed sanitization", distinct from "step skipped"
             if is_nan:
@@ -681,7 +770,12 @@ def main() -> None:
                     rollback_count=watchdog.rollback_count,
                     lr_readout=optimizer.param_groups[0]["lr"], lr_brain=optimizer.param_groups[1]["lr"],
                     watchdog_baseline=watchdog.healthy_baseline, long_median_grad_norm=watchdog.long_median(),
+                    tbptt_frames=tbptt_frames,
                 )
+                if step_result.get("probe_raw_grad") is not None:
+                    for name, gmax in zip(watched, step_result["probe_raw_grad"]):
+                        record[f"watch_{name}_raw_grad"] = gmax if gmax < float("inf") else "inf"
+                        record[f"watch_{name}_finite_frac"] = probe_finite[name] / max(probe_steps, 1)
                 with metrics_path.open("a") as f:
                     f.write(json.dumps(record) + "\n")
                 for k, v in record.items():
@@ -708,6 +802,13 @@ def main() -> None:
                     eval_wall_s=eval_wall_s, eval_ma=eval_ma,
                     best_eval_ma=watchdog.best_eval_ma.get(current_difficulty),
                 )
+                for cat, d in result["by_category"].items():
+                    if d["n"]:
+                        record[f"eval_{cat}_hit_rate"] = d["hits"] / d["n"]
+                        for m in ("extra_fret", "no_strum", "wrong_lane", "missing_fret"):
+                            record[f"eval_{cat}_{m}"] = d["miss_modes"][m]
+                if drift_ref is not None:
+                    record.update(brain_drift_stats(policy, drift_ref, optimizer, watched))
                 with metrics_path.open("a") as f:
                     f.write(json.dumps(record) + "\n")
                 tb_writer.add_scalar("eval_hit_rate", result["hit_rate"], step)

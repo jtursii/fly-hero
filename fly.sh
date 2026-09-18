@@ -3,11 +3,12 @@
 # Usage: ./fly.sh [check|awake|stop|resume [latest|best]|guard|video|log]
 set -uo pipefail
 
-# Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real
-# or runs/<timestamp>_bc_full_real_vN, newest by the timestamp in its name
+# Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real,
+# runs/<timestamp>_bc_full_real_vN or runs/<timestamp>_bc_trunc_bptt (D40),
+# newest by the timestamp in its name
 # (not mtime, and never throwaway runs like smoke_d32/resume_test_v2).
 # Override with RUN=path/to/run ./fly.sh check
-RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_bc_full_real(_v[0-9]+)?$' | sort | tail -n1)}"
+RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_(bc_full_real(_v[0-9]+)?|bc_trunc_bptt)$' | sort -t/ -k2 | tail -n1)}"
 RUN="${RUN%/}"
 MODEL="${MODEL:-connectome}"
 # Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests,
@@ -163,6 +164,37 @@ if rollbacks:
         print('  step=%s reason=%s new_lr_brain=%.2e restored_from=%s' % (
             r.get('step'), r.get('rollback_reason'), r.get('new_lr_brain', 0), r.get('restored_from')))
 "
+    fi
+
+    if [ -f "$RUN/metrics.jsonl" ] && grep -q '"drift_g_rel"\|"watch_R7_finite_frac"' "$RUN/metrics.jsonl"; then
+      echo "--- D40 pass criteria (fork of v2 @ 42000; reads at 44000 and 47000) ---"
+      tail -n 3000 "$RUN/metrics.jsonl" | python3 -c "
+import json, sys
+W = ('R7', 'R8', 'L1', 'L5', 'AN_multi_1')
+# v2 @ 42000 on the same 10 in-training val excerpts (CPU, 2026-09-17).
+BASE = json.load(open('docs/d40_baseline_42000.json'))
+tr, ev = None, None
+for line in sys.stdin:
+    try:
+        r = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if 'watch_R7_finite_frac' in r:
+        tr = r
+    if 'drift_g_rel' in r:
+        ev = r
+if tr:
+    print('finite raw grad frac: ' + '  '.join('%s %.2f' % (w, tr.get('watch_%s_finite_frac' % w, 0)) for w in W))
+if ev:
+    print('@%s |softplus(g)-g42k|/|g42k| = %.2f%% (pass > 1%%; v2 0.26%%)  tau %.2f%%  bias %.2f%%' % (
+        ev['step'], 100 * ev['drift_g_rel'], 100 * ev['drift_tau_rel'], 100 * ev['drift_bias_rel']))
+    print('adam |m|: ' + '  '.join('%s %.1e' % (w, ev.get('watch_%s_adam_m' % w, 0)) for w in W))
+    print('tau (init 0.05): ' + '  '.join('%s %.5f' % (w, ev.get('watch_%s_tau' % w, 0)) for w in W))
+    print('singles hit %.3f (42k %.3f)  extra_fret %s (42k %s)  no_strum %s (42k %s)  wrong_lane %s (42k %s)' % (
+        ev.get('eval_single_hit_rate', 0), BASE['single_hit_rate'], ev.get('eval_single_extra_fret'), BASE['extra_fret'],
+        ev.get('eval_single_no_strum'), BASE['no_strum'], ev.get('eval_single_wrong_lane'), BASE['wrong_lane']))
+"
+      echo "paired 28-excerpt val Δ (CPU, background): ./fly.sh compare <step>"
     fi
 
     if [ -f "$RUN/STOPPED.txt" ]; then
@@ -325,6 +357,19 @@ if rollbacks:
     require_run
     tail -n 20 "$RUN/resume.log" 2>/dev/null || echo "No resume log yet."
     ;;
+  compare)
+    # D40: paired 28-excerpt Medium val Δ of $RUN's checkpoint_step<step>.pt
+    # vs v2 @ 42000, both on CPU (MPS is nondeterministic, D39), background.
+    require_run
+    STEP="${2:?usage: ./fly.sh compare <step>}"
+    CK="$RUN/checkpoint_step${STEP}.pt"
+    [ -f "$CK" ] || { echo "no $CK"; exit 1; }
+    LOG="runs/compare_d40_step${STEP}.log"
+    nohup uv run python -u -m eval.compare --checkpoint "$CK" \
+      --baseline runs/20260916_222606_bc_full_real_v2/checkpoint_step42000.pt \
+      --device cpu --run-name "compare_d40_step${STEP}" > "$LOG" 2>&1 &
+    echo "started (~30 min, CPU). check: tail -n 40 $LOG"
+    ;;
   *)
     echo "./fly.sh check           → is it running + progress + last 5 evals + checkpoint age"
     echo "./fly.sh awake           → keep Mac awake (leave window open)"
@@ -333,7 +378,8 @@ if rollbacks:
     echo "./fly.sh guard [--dry-run] → auto-resume after a crash (own terminal window; max 3/night)"
     echo "./fly.sh video [song] [difficulty] → render a gameplay video at the current checkpoint's skill"
     echo "./fly.sh log             → last lines of the resume log"
+    echo "./fly.sh compare <step>  → paired 28-excerpt val Δ vs v2 @ 42000, CPU, background (D40)"
     echo ""
-    echo "RUN defaults to the newest runs/<timestamp>_bc_full_real[_vN] dir; override with RUN=path ./fly.sh ..."
+    echo "RUN defaults to the newest runs/<timestamp>_{bc_full_real[_vN],bc_trunc_bptt} dir; override with RUN=path ./fly.sh ..."
     ;;
 esac

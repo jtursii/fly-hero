@@ -111,3 +111,37 @@ def test_empty_notes():
     assert len(fret_target) == 60
     assert fret_target.sum() == 0
     assert strum.sum() == 0
+
+
+def test_hit_window_onset_starts_at_hit_window_not_midpoint():
+    # Sparse notes (1s apart): "segment" holds lane 0 from the 0.5s midpoint
+    # (and note 0 from frame 0); "hit_window" only from time_s - hit_window_s,
+    # the earliest frame rules.py can reward. Hold end is identical.
+    notes = _notes([(0.5, 0b00001, 0.0, 0), (1.5, 0b00010, 0.0, 0)])
+    seg, strum_seg = compute_frame_labels(notes, 2.0, FPS, HIT_WINDOW_S, "segment")
+    hw, strum_hw = compute_frame_labels(notes, 2.0, FPS, HIT_WINDOW_S, "hit_window")
+
+    assert np.array_equal(strum_seg, strum_hw)
+    assert seg[0] == 0b00001 and hw[0] == 0
+    assert seg[round(1.0 * FPS)] == 0b00010
+    on = np.flatnonzero(hw == 0b00010)
+    assert on[0] == int(np.ceil((1.5 - HIT_WINDOW_S) * FPS - 1e-9))
+    assert on[-1] == np.flatnonzero(seg == 0b00010)[-1]
+    # Never positive where "segment" isn't, and same lane wherever positive.
+    assert np.all((hw == 0) | (hw == seg))
+
+
+def test_hit_window_onset_dense_notes_fall_back_to_midpoint():
+    # 100ms gaps < 2*hit_window_s: midpoint is later than time_s - hit_window_s,
+    # so both onsets agree.
+    rows = [(0.1 * i + 0.2, 1 << (i % 3), 0.0, 0) for i in range(6)]
+    notes = _notes(rows)
+    seg, _ = compute_frame_labels(notes, 1.0, FPS, HIT_WINDOW_S, "segment")
+    hw, _ = compute_frame_labels(notes, 1.0, FPS, HIT_WINDOW_S, "hit_window")
+    first = round((0.2 - HIT_WINDOW_S) * FPS)
+    assert np.array_equal(seg[first:], hw[first:])
+
+
+def test_unknown_fret_onset_raises():
+    with pytest.raises(ValueError):
+        compute_frame_labels(_notes([(0.1, 1, 0.0, 0)]), 0.5, FPS, HIT_WINDOW_S, "bogus")
