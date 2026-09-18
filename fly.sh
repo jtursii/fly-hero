@@ -5,11 +5,11 @@ set -uo pipefail
 
 # Defaults to the newest main-lineage run dir: runs/<timestamp>_bc_full_real,
 # runs/<timestamp>_bc_full_real_vN, runs/<timestamp>_bc_trunc_bptt (D40) or
-# runs/<timestamp>_bc_mid_labels (D41),
+# runs/<timestamp>_bc_mid_labels (D41) or runs/<timestamp>_bc_trunc_orig_labels (D42),
 # newest by the timestamp in its name
 # (not mtime, and never throwaway runs like smoke_d32/resume_test_v2).
 # Override with RUN=path/to/run ./fly.sh check
-RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_(bc_full_real(_v[0-9]+)?|bc_trunc_bptt|bc_mid_labels)$' | sort -t/ -k2 | tail -n1)}"
+RUN="${RUN:-$(ls -d runs/*/ 2>/dev/null | sed 's:/$::' | grep -E '/[0-9]{8}_[0-9]{6}_(bc_full_real(_v[0-9]+)?|bc_trunc_bptt|bc_mid_labels|bc_trunc_orig_labels)$' | sort -t/ -k2 | tail -n1)}"
 RUN="${RUN%/}"
 MODEL="${MODEL:-connectome}"
 # Extra train.bc flags for resume (e.g. EXTRA_ARGS="--device cpu" for tests,
