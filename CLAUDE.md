@@ -19,11 +19,10 @@ At the start of every session, read `docs/PROGRESS.md` and only the current phas
 8. The song library is **read-only**: never write, move, rename, or delete anything in it. Song audio may be copied out of it into `media/` for local use (e.g. muxing into a debug video); `media/` is gitignored, audio is never committed to git, and it never goes under `web/` — **except** the full-mix audio for the 3–5 Phase 7 showcase songs, which this private repo commits under `web/public/audio/` per the user's explicit, revisit-before-public exception (D37). No other audio (stems, non-showcase songs) is ever committed. (D22, D37)
 
 ## Paths
-- Song library: `song_library` in `configs/paths.yaml` (gitignored; created in Phase 0 from the path the user gives).
-- `data/` (raw + processed), `runs/`, and `media/` are gitignored.
+- Song library: `song_library` in `configs/paths.yaml` (gitignored). `data/` (raw + processed) and `runs/` are gitignored; `media/` per invariant 8.
 
 ## Stack
-- Python 3.12 via `uv`; PyTorch (MPS or CPU, chosen by benchmark); mido; polars/pyarrow; gymnasium; pytest; TensorBoard.
+- Python 3.12 via `uv`; PyTorch (MPS/float32, chosen by the G3 benchmark); mido; polars/pyarrow; gymnasium; pytest; TensorBoard.
 - Web: `web/` with Vite + TypeScript + three.js + Tone.js, deployed to Vercel.
 - Hardware: M5 Max, 64 GB unified memory. Keep training peak memory ≤ 40 GB.
 
@@ -37,9 +36,8 @@ At the start of every session, read `docs/PROGRESS.md` and only the current phas
 - Every run writes to `runs/<timestamp>_<name>/` with a copy of its config, the seed, and the git SHA.
 - Jobs longer than 2 minutes run in the background via `nohup`, logging to their run dir.
 - Never re-download or re-parse data that already exists in `data/processed/`.
-- Small commits, one per task. Tag each finished phase `phase-N-done`.
+- Small commits, one per task; push each. Tag each finished phase `phase-N-done`.
 - Type hints on public functions; comment tensor shapes, e.g. `# [B, N]`.
-- Push to origin after every commit that completes a task.
 
 ## End of every task
 Update `docs/PROGRESS.md` with what was done, gate numbers, deviations, open issues, and repro commands. Append new decisions to `docs/DECISIONS.md`. Commit.
