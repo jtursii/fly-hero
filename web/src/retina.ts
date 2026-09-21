@@ -282,7 +282,7 @@ export class RetinaView {
     const dotR = Math.max(1, rx * 0.032);
 
     for (const eye of [0, 1] as const) {
-      const cx = eye === 0 ? w * 0.5 - w * 0.245 : w * 0.5 + w * 0.245;
+      const cx = eye === 0 ? w * 0.5 - w * 0.17 : w * 0.5 + w * 0.17;
       const tilt = (eye === 0 ? -1 : 1) * 0.16; // leaning away from the midline
       ctx.save();
       ctx.translate(cx, cy);

@@ -46,6 +46,14 @@ export class MasterClock {
    *  for a moment first, and the clock must wait there with it rather than
    *  running ahead of silence. */
   private started = false;
+  /** What the user asked for, set synchronously by play/pause/toggle. The
+   *  audio element is then reconciled to it asynchronously -- `play()`
+   *  returns a promise, and a click arriving while one is in flight must
+   *  not leave the clock and the audio in different states. */
+  private want = false;
+  /** True while `reconcile` is running, so there is only ever one in flight
+   *  and the newest `want` is the one that wins. */
+  private syncing = false;
 
   /** End of the recording in song seconds (includes the 1 s post-roll). */
   duration = 0;
@@ -93,33 +101,70 @@ export class MasterClock {
     return at >= 0 && (this.audioDuration === 0 || at < this.audioDuration - 0.05);
   }
 
-  async play(): Promise<void> {
-    if (this.playing) return;
-    this.playing = true;
-    this.wallMs = performance.now();
-    this.lastCT = -1;
-    this.started = false;
-    const a = this.audio;
-    if (a) {
-      a.playbackRate = this.rate;
-      a.currentTime = Math.max(0, this.t - this.audioOffset);
-      try {
-        await a.play();
-      } catch {
-        // Autoplay was refused (no user gesture yet). The clock still runs;
-        // the next click that reaches play() will start the audio.
-      }
-    }
+  play(): void {
+    this.setPlaying(true);
   }
 
   pause(): void {
-    this.playing = false;
-    this.audio?.pause();
+    this.setPlaying(false);
   }
 
+  /** One click, one flip -- always, however fast they arrive. */
   toggle(): void {
-    if (this.playing) this.pause();
-    else void this.play();
+    this.setPlaying(!this.want);
+  }
+
+  private setPlaying(want: boolean): void {
+    // Pressing play on a finished song restarts it. Without this the clock
+    // is already at the end, tick() stops it again immediately, and the
+    // click looks like it did nothing.
+    if (want && this.duration > 0 && this.t >= this.duration - 0.05) this.seek(0);
+    this.want = want;
+    this.playing = want;
+    if (want) {
+      this.wallMs = performance.now();
+      this.lastCT = -1;
+      this.started = false;
+    }
+    void this.reconcile();
+  }
+
+  /** Bring the audio element to `want`. Single-flight: a call made while one
+   *  is running is a no-op, because the running loop re-reads `want` and so
+   *  already acts on the newest request. */
+  private async reconcile(): Promise<void> {
+    const a = this.audio;
+    if (!a || this.syncing) return;
+    this.syncing = true;
+    try {
+      // Bounded: each pass either settles or observes a newer `want`.
+      for (let guard = 0; guard < 8; guard++) {
+        const want = this.want;
+        if (want === !a.paused) break;
+        if (!want) {
+          a.pause();
+          continue;
+        }
+        a.playbackRate = this.rate;
+        const at = Math.max(0, this.t - this.audioOffset);
+        if (Math.abs(a.currentTime - at) > 0.05) a.currentTime = at;
+        try {
+          await a.play();
+        } catch {
+          // Either a newer pause() aborted this play (then `want` is already
+          // false and the next pass settles), or the browser refused it. A
+          // refusal must stop the clock too: a running clock over silent
+          // audio is exactly the disagreement this method exists to prevent.
+          if (this.want === want) {
+            this.want = false;
+            this.playing = false;
+            break;
+          }
+        }
+      }
+    } finally {
+      this.syncing = false;
+    }
   }
 
   setRate(rate: Rate): void {
@@ -152,6 +197,10 @@ export class MasterClock {
     const dt = Math.min((nowMs - this.wallMs) / 1000, 0.25) * this.rate;
     this.wallMs = nowMs;
     this.t += dt;
+
+    // The element can stop on its own -- an aborted play, a stall, a lost
+    // decoder -- and the clock must not keep running over silence.
+    if (this.audioUsable() && this.audio!.paused && !this.syncing) void this.reconcile();
 
     if (this.audioUsable() && !this.audio!.paused) {
       const ct = this.audio!.currentTime;

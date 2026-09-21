@@ -297,7 +297,7 @@ body::before {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.4fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr)) minmax(0, 1.4fr);
   gap: 0;
   background: var(--bg-panel);
   border: 1px solid var(--line);
@@ -361,15 +361,6 @@ body::before {
 .song-btn.active { border-color: var(--accent); color: var(--text); background: #0f1d2e; box-shadow: 0 0 14px rgba(111, 211, 255, 0.18); }
 .song-btn .t { font-weight: 700; }
 .song-btn .a { font-size: 9.5px; opacity: 0.75; }
-.song-btn .tag {
-  font-size: 8px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: #0a1018;
-  background: var(--accent-warm);
-  border-radius: 3px;
-  padding: 0 4px;
-}
 .song-btn:disabled { opacity: 0.5; cursor: progress; }
 
 button.play {

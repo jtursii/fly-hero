@@ -47,7 +47,6 @@ const el = {
   sNotes: $("s-notes"),
   sOver: $("s-over"),
   sDiff: $("s-diff"),
-  sSeen: $("s-seen"),
 };
 
 const clock = new MasterClock();
@@ -134,7 +133,6 @@ async function selectSong(id: string): Promise<void> {
     el.sNotes.textContent = `${manifest.n_hits} / ${manifest.n_notes}`;
     el.sOver.textContent = manifest.overstrums_per_min.toFixed(1);
     el.sDiff.textContent = manifest.difficulty;
-    el.sSeen.textContent = manifest.seen_label;
   } catch (err) {
     currentId = null;
     console.error(err);
@@ -172,9 +170,9 @@ function buildSongButtons(a: BrainAssets): void {
     const b = document.createElement("button");
     b.className = "song-btn";
     b.dataset.id = s.song_id;
-    b.innerHTML =
-      `<span class="t">${s.title}</span>` +
-      `<span class="a">${s.artist} &middot; <span class="tag">${s.seen_label}</span></span>`;
+    // D52: no "practiced" badge -- every showcase song is one, so the label
+    // distinguished nothing. `seen_label` stays in the manifests.
+    b.innerHTML = `<span class="t">${s.title}</span><span class="a">${s.artist}</span>`;
     b.addEventListener("click", () => void selectSong(s.song_id));
     el.songs.appendChild(b);
   }
@@ -206,7 +204,7 @@ function frame(nowMs: number): void {
   brainView?.render(t);
   retinaView?.render(t);
 
-  el.play.innerHTML = clock.isPlaying ? "&#10073;&#10073;" : "&#9654;";
+  syncPlayButton();
   el.led.classList.toggle("on", clock.isPlaying);
 
   if (song) {
@@ -230,8 +228,20 @@ function frame(nowMs: number): void {
 
 // --- boot -----------------------------------------------------------------
 
+/** The glyph is also set every frame, but a click can land while the frame
+ *  loop is stalled (a song's 11-20 MB recording downloading, say), and a
+ *  button that does not react reads as a missed click. */
+function syncPlayButton(): void {
+  el.play.innerHTML = clock.isPlaying ? "&#10073;&#10073;" : "&#9654;";
+}
+
+function toggleTransport(): void {
+  clock.toggle();
+  syncPlayButton();
+}
+
 function wireTransport(): void {
-  el.play.addEventListener("click", () => clock.toggle());
+  el.play.addEventListener("click", toggleTransport);
 
   el.scrubber.addEventListener("pointerdown", () => (scrubbing = true));
   const endScrub = () => {
@@ -254,7 +264,7 @@ function wireTransport(): void {
     if (e.target instanceof HTMLInputElement) return;
     if (e.code === "Space") {
       e.preventDefault();
-      if (!el.play.disabled) clock.toggle();
+      if (!el.play.disabled) toggleTransport();
     } else if (e.code === "ArrowLeft") {
       clock.seek(clock.time - 5);
     } else if (e.code === "ArrowRight") {

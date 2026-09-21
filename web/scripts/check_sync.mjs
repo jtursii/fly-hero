@@ -136,6 +136,76 @@ for (const song of songs) {
   allOk = (await measure("2x, scrub to 120 s", { seekTo: 120, rate: 2, seconds: 6 })) && allOk;
 }
 
+// --- play/pause: one click, one flip, clock and audio in the same state ---
+//
+// Real clicks on the button, so main.ts's handler is in the path too. The
+// hazard being checked is a click landing while an earlier audio.play()
+// promise is still in flight.
+async function transportChecks() {
+  await page.evaluate((id) => window.flyhero.selectSong(id), songs[0].song_id);
+  await page.waitForFunction(() => window.flyhero.getSong() !== null, { timeout: 30000 });
+  await page.waitForFunction(() => window.flyhero.audio.readyState >= 2, { timeout: 60000 });
+  await page.evaluate(() => window.flyhero.clock.seek(30));
+
+  const state = () => page.evaluate(() => ({
+    playing: window.flyhero.clock.isPlaying,
+    paused: window.flyhero.audio.paused,
+    t: window.flyhero.clock.time,
+  }));
+  let ok = true;
+  const say = (good, msg) => { console.log(`${good ? "PASS " : "FAIL "} ${msg}`); if (!good) ok = false; };
+
+  // 1. Every single click toggles, and both sides agree afterwards.
+  for (let i = 0; i < 6; i++) {
+    const before = await state();
+    await page.click("#play");
+    await sleep(320);
+    const after = await state();
+    if (after.playing === before.playing) say(false, `click ${i + 1} did not toggle (still ${after.playing ? "playing" : "paused"})`);
+    if (after.playing === after.paused) say(false, `click ${i + 1}: clock ${after.playing ? "playing" : "paused"} but audio ${after.paused ? "paused" : "playing"}`);
+  }
+  say(ok, "6 single clicks: each toggled, clock and audio agreed every time");
+
+  // 2. Rapid clicks, faster than an audio play() promise settles.
+  for (const n of [2, 3, 8, 9]) {
+    const before = await state();
+    for (let i = 0; i < n; i++) { await page.click("#play", { delay: 0 }); await sleep(25); }
+    await sleep(700);
+    const after = await state();
+    const want = n % 2 === 0 ? before.playing : !before.playing;
+    say(after.playing === want && after.playing !== after.paused,
+        `${n} rapid clicks -> ${after.playing ? "playing" : "paused"} (expected ${want ? "playing" : "paused"}), ` +
+        `audio ${after.paused ? "paused" : "playing"}`);
+  }
+
+  // 3. Play on a finished song restarts it rather than doing nothing.
+  await page.evaluate(() => {
+    window.flyhero.clock.pause();
+    window.flyhero.clock.seek(window.flyhero.clock.duration);
+  });
+  await sleep(200);
+  await page.click("#play");
+  await sleep(700);
+  const restarted = await state();
+  say(restarted.playing && !restarted.paused && restarted.t < 5,
+      `play at the end restarts (playing ${restarted.playing}, t ${restarted.t.toFixed(2)} s)`);
+  await page.evaluate(() => { window.flyhero.clock.pause(); window.flyhero.clock.seek(30); });
+  await sleep(200);
+
+  // 4. After all that, playing still advances both the clock and the audio.
+  const before = await page.evaluate(() => ({ t: window.flyhero.clock.time, a: window.flyhero.audio.currentTime }));
+  if (!(await state()).playing) await page.click("#play");
+  await sleep(1200);
+  const after = await page.evaluate(() => ({ t: window.flyhero.clock.time, a: window.flyhero.audio.currentTime }));
+  say(after.t - before.t > 0.8 && after.a - before.a > 0.8,
+      `still running after the hammering: clock +${(after.t - before.t).toFixed(2)} s, audio +${(after.a - before.a).toFixed(2)} s`);
+  await page.evaluate(() => window.flyhero.clock.pause());
+  return ok;
+}
+
+console.log("\n--- transport ---");
+allOk = (await transportChecks()) && allOk;
+
 // Frames with the playhead parked on dense stretches, for eyeballing.
 await page.evaluate((id) => window.flyhero.selectSong(id), songs[0].song_id);
 await page.waitForFunction(() => window.flyhero.getSong() !== null);
