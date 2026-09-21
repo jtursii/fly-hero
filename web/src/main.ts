@@ -7,7 +7,9 @@
 
 import "./style.css";
 import { MasterClock, type Rate } from "./clock.ts";
-import { buildNoteStates, loadBrainAssets, loadSongLight, overstrumTimes } from "./data.ts";
+import {
+  buildNoteStates, loadBrainAssets, loadSongHeavy, loadSongLight, overstrumTimes,
+} from "./data.ts";
 import { Highway } from "./highway.ts";
 import { BrainView } from "./brain.ts";
 import type { BrainAssets, GameEvent, Manifest, SongLight } from "./types.ts";
@@ -22,8 +24,13 @@ const $ = <T extends HTMLElement>(id: string): T => {
 
 const el = {
   ckpt: $("ckpt"),
-  brainMeta: $("brain-meta"),
+  credit: $("credit"),
   brainCanvas: $<HTMLCanvasElement>("brain-canvas"),
+  bActive: $("b-active"),
+  bActiveK: $("b-active-k"),
+  bMean: $("b-mean"),
+  bFps: $("b-fps"),
+  crtTitle: $("crt-title"),
   highway: $<HTMLCanvasElement>("highway"),
   led: $("crt-led"),
   songs: $("songs"),
@@ -48,6 +55,9 @@ let assets: BrainAssets | null = null;
 let song: SongLight | null = null;
 let currentId: string | null = null;
 let loading = false;
+/** Rolling mean of the whole frame (every panel), shown in the brain panel. */
+let frameMs = 0;
+let lastFrameAt = 0;
 let scrubbing = false;
 /** Event times in song seconds, ascending, for the live counters. */
 let eventTimes = { hit: new Float64Array(0), miss: new Float64Array(0), over: new Float64Array(0) };
@@ -84,6 +94,7 @@ async function selectSong(id: string): Promise<void> {
   currentId = id;
   clock.pause();
   highway.clearSong();
+  brainView?.setSong(null, null);
   song = null;
   syncSongButtons(true);
 
@@ -110,6 +121,8 @@ async function selectSong(id: string): Promise<void> {
     el.scrubber.disabled = false;
     el.play.disabled = false;
 
+    el.crtTitle.textContent =
+      `${manifest.artist} — ${manifest.title} · ${manifest.difficulty}`.toUpperCase();
     el.sHit.textContent = (manifest.hit_rate * 100).toFixed(1) + "%";
     el.sNotes.textContent = `${manifest.n_hits} / ${manifest.n_notes}`;
     el.sOver.textContent = manifest.overstrums_per_min.toFixed(1);
@@ -122,6 +135,21 @@ async function selectSong(id: string): Promise<void> {
   } finally {
     loading = false;
     syncSongButtons(false);
+  }
+
+  // D45 / PLAN task 8: the recording itself (up to 21 MB) comes down only
+  // now, and only after the light files, so the transport is usable first.
+  if (song && brainView && assets && currentId === id) {
+    el.bActive.textContent = "···";
+    try {
+      const heavy = await loadSongHeavy(id, song.manifest);
+      if (currentId !== id) return; // the user moved on while it downloaded
+      const scopeAll = Math.max(0, assets.brain.scope_channels.indexOf("all"));
+      brainView.setSong(heavy, song.manifest, scopeAll);
+    } catch (err) {
+      console.error(err);
+      el.bActive.textContent = "—";
+    }
   }
 }
 
@@ -162,6 +190,8 @@ function buildRateButtons(): void {
 // --- frame loop -----------------------------------------------------------
 
 function frame(nowMs: number): void {
+  if (lastFrameAt) frameMs += ((nowMs - lastFrameAt) - frameMs) * 0.05;
+  lastFrameAt = nowMs;
   clock.tick(nowMs);
   const t = clock.time;
 
@@ -178,6 +208,11 @@ function frame(nowMs: number): void {
     const misses = countUpTo(eventTimes.miss, t);
     const overs = countUpTo(eventTimes.over, t);
     el.counter.textContent = `${hits} hit · ${misses} miss · ${overs} overstrum`;
+    if (brainView) {
+      el.bActive.textContent = brainView.stats.active.toLocaleString();
+      el.bMean.textContent = brainView.stats.meanActivation.toFixed(4);
+      el.bFps.textContent = `${frameMs.toFixed(1)} ms/frame`;
+    }
     const ms = clock.drift * 1000;
     el.sync.textContent = `sync ${ms >= 0 ? "+" : ""}${ms.toFixed(0)} ms`;
     el.sync.classList.toggle("bad", Math.abs(ms) > 40);
@@ -224,7 +259,11 @@ function wireTransport(): void {
     brainView?.resize();
   };
   window.addEventListener("resize", onResize);
-  new ResizeObserver(onResize).observe(el.highway.parentElement!);
+  // The CRT and the brain canvas are both sized by the grid, so watch the
+  // panels rather than only the window.
+  const ro = new ResizeObserver(onResize);
+  ro.observe(el.highway.parentElement!);
+  ro.observe(el.brainCanvas.parentElement!);
 }
 
 async function boot(): Promise<void> {
@@ -235,9 +274,12 @@ async function boot(): Promise<void> {
   assets = await loadBrainAssets();
   const b = assets.brain;
   el.ckpt.textContent = b.checkpoint_step.toLocaleString();
-  el.brainMeta.textContent =
-    `${b.n_neurons.toLocaleString()} neurons · ${b.activity_slots.toLocaleString()} recorded slots ` +
-    `(${b.slot_allocation.dn} DN)`;
+  el.credit.textContent =
+    `${b.attribution.connectome} · ${b.n_neurons.toLocaleString()} neurons · ` +
+    `${b.flow_edges.count.toLocaleString()} signal lines drawn`;
+  el.bActiveK.textContent =
+    `active of ${b.activity_slots.toLocaleString()} recorded (${b.slot_allocation.dn} DN, ` +
+    `${b.slot_allocation.input} photoreceptors)`;
   buildSongButtons(assets);
   // ?nobrain=1 skips the WebGL panel. scripts/check_sync.mjs uses it so the
   // clock is measured on its own: headless Chromium software-renders 139k
@@ -262,6 +304,7 @@ declare global {
       clock: MasterClock;
       audio: HTMLAudioElement;
       selectSong: (id: string) => Promise<void>;
+      getBrain: () => BrainView | null;
       getSong: () => SongLight | null;
       getAssets: () => BrainAssets | null;
     };
@@ -271,6 +314,7 @@ window.flyhero = {
   clock,
   audio: el.audio,
   selectSong,
+  getBrain: () => brainView,
   getSong: () => song,
   getAssets: () => assets,
 };

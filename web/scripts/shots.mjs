@@ -22,9 +22,9 @@ const SHOTS = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const browser = await chromium.launch({
-  args: ["--mute-audio", "--use-gl=angle", "--use-angle=swiftshader"],
-});
+// Headed, like check_brain.mjs: software rendering the connectome panel
+// starves the compositor and rAF stops firing.
+const browser = await chromium.launch({ headless: false, args: ["--mute-audio"] });
 const page = await browser.newPage({ viewport: { width: 1680, height: 1000 } });
 await page.goto(URL, { waitUntil: "networkidle" });
 await page.waitForFunction(() => document.querySelectorAll(".song-btn").length > 0, { timeout: 30000 });
@@ -36,10 +36,8 @@ for (const shot of SHOTS) {
   await page.evaluate((t) => window.flyhero.clock.seek(t), shot.t);
   await sleep(700);
   await page.screenshot({ path: `scripts/_shot_${shot.name}.png` });
-  await page.screenshot({
-    path: `scripts/_shot_${shot.name}_crt.png`,
-    clip: { x: 852, y: 82, width: 812, height: 800 },
-  });
+  const box = await page.locator(".crt").boundingBox();
+  await page.screenshot({ path: `scripts/_shot_${shot.name}_crt.png`, clip: box });
   console.log(`${shot.name}: ${songs[shot.song].title} @ ${shot.t}s`);
 }
 await browser.close();

@@ -10,7 +10,8 @@ Checks, in order:
   3. Audio placement: the only audio under web/ may be the D37 showcase
      MP3s, one per exported song, and nothing else.
   4. Every file the manifests reference exists and has the length the
-     manifest's frame counts imply.
+     manifest's frame counts imply, and the shared brain files match
+     brain.json's neuron and flow-edge counts.
 
 Usage: uv run python -m export.validate_export --config configs/export.yaml
 """
@@ -99,7 +100,9 @@ def main() -> None:
 
     brain = json.loads((data_dir / "brain.json").read_text())
     n = brain["n_neurons"]
-    for name, want in (("positions.bin", n * 3 * 4), ("classes.bin", n), ("pos_source.bin", n)):
+    want_flow = brain["flow_edges"]["count"] * 3 * 4
+    for name, want in (("positions.bin", n * 3 * 4), ("classes.bin", n), ("pos_source.bin", n),
+                       ("flow_edges.bin", want_flow)):
         got = (data_dir / name).stat().st_size
         if got != want:
             failures.append(f"{name} is {got} bytes, expected {want}")

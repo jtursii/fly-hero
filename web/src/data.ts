@@ -37,19 +37,29 @@ async function fetchFloat32(url: string): Promise<Float32Array> {
   return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 }
 
+async function fetchInt32(url: string): Promise<Int32Array> {
+  const bytes = await fetchBytes(url);
+  return new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+}
+
 /** Everything needed before a song is picked. */
 export async function loadBrainAssets(): Promise<BrainAssets> {
   const brain = await fetchJson<Brain>(`${DATA}/brain.json`);
-  const [positions, classes, posSource] = await Promise.all([
+  const [positions, classes, posSource, flowEdges] = await Promise.all([
     fetchFloat32(`${DATA}/positions.bin`),
     fetchBytes(`${DATA}/classes.bin`),
     fetchBytes(`${DATA}/pos_source.bin`),
+    fetchInt32(`${DATA}/flow_edges.bin`),
   ]);
   const n = brain.n_neurons;
   if (positions.length !== n * 3) throw new Error(`positions.bin: ${positions.length} != ${n * 3}`);
   if (classes.length !== n) throw new Error(`classes.bin: ${classes.length} != ${n}`);
   if (posSource.length !== n) throw new Error(`pos_source.bin: ${posSource.length} != ${n}`);
-  return { brain, positions, classes, posSource };
+  const wantEdges = brain.flow_edges.count * 3;
+  if (flowEdges.length !== wantEdges) {
+    throw new Error(`flow_edges.bin: ${flowEdges.length} != ${wantEdges}`);
+  }
+  return { brain, positions, classes, posSource, flowEdges };
 }
 
 /** The per-song files the highway, transport and stat strip need (~0.5 MB). */
@@ -70,8 +80,8 @@ export async function loadSongLight(songId: string): Promise<SongLight> {
   return { manifest, events, actions, probs };
 }
 
-/** The recording itself (up to 21 MB). Nothing calls this yet -- the brain,
- *  retina and oscilloscope panels are placeholders until Sessions 2-4. */
+/** The recording itself (up to 21 MB). Fetched lazily, after the light
+ *  files, so the transport and highway start without waiting on it (D45). */
 export async function loadSongHeavy(songId: string, manifest: Manifest): Promise<SongHeavy> {
   const dir = `${DATA}/songs/${songId}`;
   const [activity, retina, scope] = await Promise.all([

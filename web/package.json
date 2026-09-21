@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "check:sync": "node scripts/check_sync.mjs",
+    "check:brain": "node scripts/check_brain.mjs",
     "shots": "node scripts/shots.mjs"
   },
   "dependencies": {

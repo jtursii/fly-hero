@@ -12,80 +12,109 @@
         <div class="brand">FLY<span>HERO</span></div>
         <div class="tagline">
           A rate model of the adult <i>Drosophila</i> brain, wired from the FlyWire v783
-          connectome, playing charts it learned on &mdash; replay only.
-          <span class="ckpt">checkpoint step <b id="ckpt">&mdash;</b></span>
+          connectome, playing charts it learned on &mdash; recorded replay, nothing trains here.
         </div>
+        <div class="credit" id="credit">FlyWire FAFB v783</div>
       </header>
 
       <main class="grid">
-        <section class="panel brain-panel" id="brain-panel">
-          <h2 class="panel-title">Connectome <span class="meta" id="brain-meta">loading&hellip;</span></h2>
-          <canvas id="brain-canvas"></canvas>
-          <div class="placeholder-tag">PLACEHOLDER &middot; Session 2 &mdash; activity animation, bloom, input/DN highlight</div>
-        </section>
-
-        <section class="crt-column">
-          <div class="crt">
-            <div class="crt-screen">
-              <canvas id="highway"></canvas>
-              <div class="crt-scanlines"></div>
-              <div class="crt-glass"></div>
-            </div>
-            <div class="crt-chin">
-              <span class="crt-brand">FLYWIRE</span>
-              <span class="crt-led" id="crt-led"></span>
-            </div>
-          </div>
+        <!-- Left ~55%: stat strip, stage (fly slot + CRT), transport. -->
+        <section class="stage-col">
           <div class="stats" id="stats">
-            <div class="stat"><span class="k">hit rate</span><span class="v" id="s-hit">&mdash;</span></div>
-            <div class="stat"><span class="k">notes hit</span><span class="v" id="s-notes">&mdash;</span></div>
-            <div class="stat"><span class="k">overstrums/min</span><span class="v" id="s-over">&mdash;</span></div>
-            <div class="stat"><span class="k">difficulty</span><span class="v" id="s-diff">&mdash;</span></div>
-            <div class="stat"><span class="k">this song</span><span class="v" id="s-seen">&mdash;</span></div>
+            <div class="stat"><span class="v" id="s-hit">&mdash;</span><span class="k">hit rate</span></div>
+            <div class="stat"><span class="v" id="s-notes">&mdash;</span><span class="k">notes hit</span></div>
+            <div class="stat"><span class="v" id="s-over">&mdash;</span><span class="k">overstrums/min</span></div>
+            <div class="stat"><span class="v" id="s-diff">&mdash;</span><span class="k">difficulty</span></div>
+            <div class="stat"><span class="v" id="s-seen">&mdash;</span><span class="k">this chart</span></div>
+            <div class="stat wide">
+              <span class="v">step <b id="ckpt">&mdash;</b></span>
+              <span class="k">15h53m of training (lineage)</span>
+            </div>
           </div>
+
+          <section class="panel stage-panel">
+            <h2 class="panel-title">Stage <span class="meta">&middot; over the shoulder</span></h2>
+            <div class="stage-body">
+              <div class="fly-slot" id="fly-slot">
+                <div class="placeholder-tag">
+                  [3D FLY &mdash; seated on a stool,<br />mini guitar controller in its forelegs,<br />facing the screen]
+                  <br /><br />PLACEHOLDER &middot; Session 5
+                </div>
+              </div>
+              <div class="crt">
+                <div class="crt-screen">
+                  <canvas id="highway"></canvas>
+                  <div class="crt-scanlines"></div>
+                  <div class="crt-glass"></div>
+                </div>
+                <div class="crt-chin">
+                  <span class="crt-brand" id="crt-title">FLYWIRE</span>
+                  <span class="crt-led" id="crt-led"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <footer class="transport">
+            <div class="row">
+              <button class="play" id="play" disabled aria-label="play/pause">&#9654;</button>
+              <div class="rates" id="rates"></div>
+              <div class="scrub">
+                <input type="range" id="scrubber" min="0" max="1" step="0.001" value="0" disabled />
+              </div>
+              <span class="time" id="time">0:00 / 0:00</span>
+            </div>
+            <div class="row">
+              <div class="songs" id="songs"></div>
+              <div class="readouts">
+                <span class="counter" id="counter">&mdash;</span>
+                <span class="sync" id="sync" title="master clock minus audio clock">sync &mdash;</span>
+              </div>
+            </div>
+          </footer>
         </section>
 
-        <div class="aux-row">
-          <section class="panel small" id="eyes-panel">
-            <h2 class="panel-title">Fly's-eye view</h2>
+        <!-- Right ~45%: brain, fly's-eye view, then decision bars + scope. -->
+        <section class="tele-col">
+          <section class="panel brain-panel" id="brain-panel">
+            <h2 class="panel-title">Connectome <span class="meta">&middot; live activity</span></h2>
+            <span class="panel-note">whole brain, both optic lobes &middot; drag to rotate</span>
+            <canvas id="brain-canvas"></canvas>
+            <div class="brain-stats">
+              <div class="big"><span class="v" id="b-active">&mdash;</span><span class="k" id="b-active-k">active of 4,096 recorded</span></div>
+              <div class="big"><span class="v" id="b-mean">&mdash;</span><span class="k">mean activation (all 139,241)</span></div>
+              <ul class="legend">
+                <li><i class="dot exc"></i>excitatory</li>
+                <li><i class="dot inh"></i>inhibitory</li>
+              </ul>
+              <div class="fps" id="b-fps"></div>
+            </div>
+          </section>
+
+          <section class="panel eyes-panel" id="eyes-panel">
+            <h2 class="panel-title">Through the fly's eyes <span class="meta">&middot; 11,118 photoreceptors</span></h2>
+            <span class="panel-note">both compound eyes</span>
             <div class="placeholder-body">
               <div class="placeholder-tag">PLACEHOLDER &middot; Session 3 &mdash; retina lattice from <code>retina.bin</code></div>
             </div>
           </section>
-          <section class="panel small" id="dn-panel">
-            <h2 class="panel-title">Decision bars</h2>
-            <div class="placeholder-body">
-              <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 6 readout probabilities from <code>probs.bin</code></div>
-            </div>
-          </section>
-          <section class="panel small" id="scope-panel">
-            <h2 class="panel-title">Oscilloscope</h2>
-            <div class="placeholder-body">
-              <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 20 s ring buffer from <code>scope.bin</code></div>
-            </div>
-          </section>
-          <section class="panel small" id="stage-panel">
-            <h2 class="panel-title">Stage</h2>
-            <div class="placeholder-body">
-              <div class="placeholder-tag">PLACEHOLDER &middot; Session 5 &mdash; 3D fly, stool, controller (illustration, not data)</div>
-            </div>
-          </section>
-        </div>
-      </main>
 
-      <footer class="transport">
-        <div class="songs" id="songs"></div>
-        <button class="play" id="play" disabled aria-label="play/pause">&#9654;</button>
-        <div class="rates" id="rates"></div>
-        <div class="scrub">
-          <input type="range" id="scrubber" min="0" max="1" step="0.001" value="0" disabled />
-        </div>
-        <div class="readouts">
-          <span class="time" id="time">0:00 / 0:00</span>
-          <span class="counter" id="counter">&mdash;</span>
-          <span class="sync" id="sync" title="master clock minus audio clock">sync &mdash;</span>
-        </div>
-      </footer>
+          <div class="aux-row">
+            <section class="panel dn-panel" id="dn-panel">
+              <h2 class="panel-title">Descending neurons <span class="meta">&middot; decision</span></h2>
+              <div class="placeholder-body">
+                <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 6 readout probabilities from <code>probs.bin</code></div>
+              </div>
+            </section>
+            <section class="panel scope-panel" id="scope-panel">
+              <h2 class="panel-title">Rate oscilloscope</h2>
+              <div class="placeholder-body">
+                <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 20 s ring buffer from <code>scope.bin</code></div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
     </div>
 
     <audio id="audio" preload="auto"></audio>

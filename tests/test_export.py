@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 
-from export.export_web import choose_slots, normalize_positions, notes_json, pack_4bit
+from export.export_web import choose_slots, flow_edges, normalize_positions, notes_json, pack_4bit
 from export.record import choose_retina_channels, quantize_4bit, scope_channels
 from export.validate_export import notes_from_manifest, unpack_actions
 from flyhero.game.retina import build_photoreceptor_map
@@ -99,6 +99,27 @@ def test_normalize_positions_centers_and_scales():
     assert out.dtype == np.float32
     assert np.allclose(out.mean(axis=0), 0.0, atol=1e-6)
     assert np.isclose(np.linalg.norm(out, axis=1).max(), 1.0, atol=1e-6)
+
+
+def test_flow_edges_are_real_edges_from_recorded_neurons():
+    # 4 neurons: 0 optic, 1 central, 2 descending, 3 central (not recorded).
+    graph = {
+        "super_class_id": np.array([0, 1, 2, 1], dtype=np.int64),
+        "pre": np.array([0, 1, 3, 0], dtype=np.int64),
+        "post": np.array([1, 2, 0, 3], dtype=np.int64),
+        "syn_count": np.array([9, 7, 5, 3], dtype=np.int64),
+        "sign": np.array([1, -1, 1, 1], dtype=np.int8),
+    }
+    names = ["optic", "central", "descending"]
+    out = flow_edges(graph, np.array([0, 1, 2]), names)
+
+    assert out.dtype == np.int32 and out.shape[1] == 3
+    rows = {(int(a), int(b)): int(s) for a, b, s in out}
+    # The 3 -> 0 edge is dropped: neuron 3 is not a recorded slot, so the
+    # site would have no activity to brighten that line with.
+    assert rows == {(0, 1): 1, (1, 2): -1, (0, 3): 1}
+    # Slots, neuron indices and signs all survive as the graph had them.
+    assert set(out[:, 2].tolist()) <= {-1, 1}
 
 
 def test_scope_channels_are_named_for_every_super_class():

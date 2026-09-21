@@ -1,0 +1,99 @@
+== STOP FILES ==
+runs/20260916_222606_bc_full_real_v2/STOPPED_BY_USER
+== GUARD ==
+1789624922 2026-09-17T00:02:02 guard started (pid 80225)
+1789658193 2026-09-17T09:16:33 STOPPED_BY_USER present -- guard exiting
+== ALL EVALS ==
+14000 Medium 0.516 61.6
+15000 Medium 0.438 62.6
+16000 Medium 0.452 45.9
+17000 Medium 0.476 57.1
+18000 Medium 0.475 51.4
+19000 Medium 0.603 57.3
+20000 Medium 0.573 54.1
+21000 Medium 0.55 44.2
+22000 Medium 0.517 57.4
+23000 Medium 0.59 43.3
+24000 Medium 0.51 52.5
+25000 Medium 0.6 47.1
+26000 Medium 0.661 40.8
+27000 Medium 0.667 38.0
+28000 Medium 0.725 35.8
+29000 Medium 0.661 39.3
+30000 Medium 0.652 33.7
+31000 Medium 0.622 38.9
+32000 Medium 0.66 41.7
+33000 Medium 0.602 38.3
+34000 Medium 0.644 36.3
+35000 Medium 0.595 51.3
+36000 Medium 0.663 41.1
+37000 Medium 0.658 40.9
+38000 Medium 0.73 39.0
+39000 Medium 0.673 42.2
+40000 Medium 0.718 34.5
+41000 Medium 0.635 40.7
+42000 Medium 0.732 40.5
+== GRAD MEDIAN PER 1000 ==
+13000 271 12
+14000 331 15
+15000 373 21
+16000 298 12
+17000 1007 50
+18000 368 18
+19000 331 17
+20000 246 8
+21000 275 12
+22000 270 8
+23000 325 13
+24000 309 16
+25000 434 14
+26000 328 16
+27000 363 18
+28000 436 19
+29000 465 27
+30000 356 27
+31000 372 24
+32000 403 22
+33000 340 12
+34000 383 21
+35000 310 16
+36000 278 13
+37000 292 19
+38000 346 14
+39000 525 34
+40000 4286 77
+41000 2544 77
+42000 657 10
+== WATCHDOG EVENTS ==
+{"step": 42110, "difficulty": "Medium", "loss": 0.9259247779846191, "fret_loss": 0.24765241146087646, "strum_loss": 0.6782723665237427, "grad_norm": 3307.451416015625, "grad_norm_readout": 1.0244389772415161, "max_abs_state": 11.838071823120117, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7917179494234604, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 931.6893920898438, "watchdog_skip_rate": 0.007579229386258681, "rollback_count": 1}
+{"step": 42120, "difficulty": "Medium", "loss": 2.033867835998535, "fret_loss": 0.23514847457408905, "strum_loss": 1.7987192869186401, "grad_norm": 102.41392517089844, "grad_norm_readout": 5.220896244049072, "max_abs_state": 11.838051795959473, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7903592655520557, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 896.41162109375, "watchdog_skip_rate": 0.007576558480459527, "rollback_count": 1}
+{"step": 42130, "difficulty": "Medium", "loss": 0.570669412612915, "fret_loss": 0.13177786767482758, "strum_loss": 0.43889155983924866, "grad_norm": 624.8412475585938, "grad_norm_readout": 0.3149639964103699, "max_abs_state": 11.838028907775879, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7930680289506331, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 931.3597412109375, "watchdog_skip_rate": 0.007573889456441329, "rollback_count": 1}
+{"step": 42140, "difficulty": "Medium", "loss": 0.8069491386413574, "fret_loss": 0.2257424145936966, "strum_loss": 0.581206738948822, "grad_norm": 852.9447631835938, "grad_norm_readout": 0.6629731059074402, "max_abs_state": 11.867191314697266, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7931376791722161, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 931.3597412109375, "watchdog_skip_rate": 0.007571222312216079, "rollback_count": 1}
+{"step": 42150, "difficulty": "Medium", "loss": 0.594628095626831, "fret_loss": 0.1527906060218811, "strum_loss": 0.44183751940727234, "grad_norm": 2061.255126953125, "grad_norm_readout": 1.0860267877578735, "max_abs_state": 11.645306587219238, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7930681039281452, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 929.0454711914062, "watchdog_skip_rate": 0.007568557045798571, "rollback_count": 1}
+{"step": 42160, "difficulty": "Medium", "loss": 0.7932437062263489, "fret_loss": 0.23505498468875885, "strum_loss": 0.5581887364387512, "grad_norm": 1318.53271484375, "grad_norm_readout": 0.5114917159080505, "max_abs_state": 11.94876766204834, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7892712182221123, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 940.4619140625, "watchdog_skip_rate": 0.007565893655206391, "rollback_count": 1}
+{"step": 42170, "difficulty": "Medium", "loss": 0.7515614032745361, "fret_loss": 0.14199303090572357, "strum_loss": 0.6095683574676514, "grad_norm": 261.65966796875, "grad_norm_readout": 0.6230396032333374, "max_abs_state": 11.648895263671875, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7916480427850036, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 936.6424560546875, "watchdog_skip_rate": 0.007563232138459915, "rollback_count": 1}
+{"step": 42180, "difficulty": "Medium", "loss": 0.7889696955680847, "fret_loss": 0.15247708559036255, "strum_loss": 0.6364926099777222, "grad_norm": 814.535888671875, "grad_norm_readout": 0.3545066714286804, "max_abs_state": 11.86670207977295, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7933649085065366, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 901.2879638671875, "watchdog_skip_rate": 0.007560572493582305, "rollback_count": 1}
+{"step": 42190, "difficulty": "Medium", "loss": 0.7454226016998291, "fret_loss": 0.14476211369037628, "strum_loss": 0.600660502910614, "grad_norm": 2022.6083984375, "grad_norm_readout": 1.8554328680038452, "max_abs_state": 11.867509841918945, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7932411473041587, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 865.4346923828125, "watchdog_skip_rate": 0.007557914718599501, "rollback_count": 1}
+{"step": 42200, "difficulty": "Medium", "loss": 0.5872483253479004, "fret_loss": 0.15602904558181763, "strum_loss": 0.43121927976608276, "grad_norm": 125.8363265991211, "grad_norm_readout": 0.29643261432647705, "max_abs_state": 11.94900131225586, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7930839195015894, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 865.4346923828125, "watchdog_skip_rate": 0.007555258811540218, "rollback_count": 1}
+{"step": 42210, "difficulty": "Medium", "loss": 0.6895779967308044, "fret_loss": 0.17657683789730072, "strum_loss": 0.5130011439323425, "grad_norm": 644.2398681640625, "grad_norm_readout": 2.000734329223633, "max_abs_state": 11.867441177368164, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7911129883576029, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 936.6424560546875, "watchdog_skip_rate": 0.007552604770435943, "rollback_count": 1}
+{"step": 42220, "difficulty": "Medium", "loss": 0.41428905725479126, "fret_loss": 0.10414759814739227, "strum_loss": 0.3101414740085602, "grad_norm": 1016.6900634765625, "grad_norm_readout": 0.5831879377365112, "max_abs_state": 11.86713981628418, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7953600507870937, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 950.8185119628906, "watchdog_skip_rate": 0.007549952593320926, "rollback_count": 1}
+{"step": 42230, "difficulty": "Medium", "loss": 0.8746178150177002, "fret_loss": 0.1360420286655426, "strum_loss": 0.7385757565498352, "grad_norm": 319.05712890625, "grad_norm_readout": 2.0043716430664062, "max_abs_state": 11.83767318725586, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7958821630373958, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 901.2879638671875, "watchdog_skip_rate": 0.007547302278232176, "rollback_count": 1}
+{"step": 42240, "difficulty": "Medium", "loss": 0.6999810934066772, "fret_loss": 0.20910151302814484, "strum_loss": 0.4908795654773712, "grad_norm": 294.3315124511719, "grad_norm_readout": 1.3159210681915283, "max_abs_state": 11.867192268371582, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7958730238485782, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 965.9461975097656, "watchdog_skip_rate": 0.007544653823209461, "rollback_count": 1}
+{"step": 42250, "difficulty": "Medium", "loss": 0.8643052577972412, "fret_loss": 0.16265004873275757, "strum_loss": 0.7016552090644836, "grad_norm": 656.9901123046875, "grad_norm_readout": 1.0038747787475586, "max_abs_state": 11.837379455566406, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.795802230562038, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 976.6667175292969, "watchdog_skip_rate": 0.007542007226295296, "rollback_count": 1}
+{"step": 42260, "difficulty": "Medium", "loss": 0.5728263854980469, "fret_loss": 0.21927499771118164, "strum_loss": 0.35355135798454285, "grad_norm": 311.5888366699219, "grad_norm_readout": 1.477734088897705, "max_abs_state": 11.837258338928223, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7931979762587434, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 1051.6781616210938, "watchdog_skip_rate": 0.007539362485534944, "rollback_count": 1}
+{"step": 42270, "difficulty": "Medium", "loss": 0.9637167453765869, "fret_loss": 0.16611513495445251, "strum_loss": 0.797601580619812, "grad_norm": 285.2043151855469, "grad_norm_readout": 1.2251288890838623, "max_abs_state": 11.837188720703125, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7955224474368997, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 1088.53125, "watchdog_skip_rate": 0.007536719598976408, "rollback_count": 1}
+{"step": 42280, "difficulty": "Medium", "loss": 0.6456270813941956, "fret_loss": 0.09376467019319534, "strum_loss": 0.5518624186515808, "grad_norm": 6579.5078125, "grad_norm_readout": 0.5443938970565796, "max_abs_state": 11.648012161254883, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7938353155954493, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 1150.9208984375, "watchdog_skip_rate": 0.007534078564670428, "rollback_count": 1}
+{"step": 42290, "difficulty": "Medium", "loss": 0.8216896057128906, "fret_loss": 0.18413007259368896, "strum_loss": 0.6375595331192017, "grad_norm": 1617.002685546875, "grad_norm_readout": 0.594123125076294, "max_abs_state": 11.837105751037598, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.7934748680511684, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 1222.8833618164062, "watchdog_skip_rate": 0.0075314393806704735, "rollback_count": 1}
+{"step": 42300, "difficulty": "Medium", "loss": 0.9228363037109375, "fret_loss": 0.16840584576129913, "strum_loss": 0.7544304728507996, "grad_norm": 3537.336669921875, "grad_norm_readout": 2.0143914222717285, "max_abs_state": 11.866567611694336, "n_bad_elems": 15, "skip": false, "skip_reason": null, "nan_frac": 1.0, "steps_per_s": 0.793221815135561, "pos_weight": 23.34077079107505, "rolling_median_grad_norm": 1287.9807739257812, "watchdog_skip_rate": 0.007528802045032742, "rollback_count": 1}
+== CHECKPOINTS ==
+lrwxr-xr-x@ 1 joeyt  staff        23 Sep 17 09:15 runs/20260916_222606_bc_full_real_v2/checkpoint_latest.pt -> checkpoint_step42306.pt
+-rw-r--r--@ 1 joeyt  staff  80315145 Sep 17 09:15 runs/20260916_222606_bc_full_real_v2/checkpoint_step42306.pt
+lrwxr-xr-x@ 1 joeyt  staff        23 Sep 17 09:09 runs/20260916_222606_bc_full_real_v2/checkpoint_best.pt -> checkpoint_step42000.pt
+lrwxr-xr-x@ 1 joeyt  staff        23 Sep 17 09:08 runs/20260916_222606_bc_full_real_v2/checkpoint_last_healthy.pt -> checkpoint_step42000.pt
+-rw-r--r--@ 1 joeyt  staff  80315145 Sep 17 09:08 runs/20260916_222606_bc_full_real_v2/checkpoint_step42000.pt
+-rw-r--r--@ 1 joeyt  staff  80315145 Sep 17 08:57 runs/20260916_222606_bc_full_real_v2/checkpoint_step41500.pt
+-rw-r--r--@ 1 joeyt  staff  80315145 Sep 17 08:46 runs/20260916_222606_bc_full_real_v2/checkpoint_step41000.pt
+-rw-r--r--@ 1 joeyt  staff  80315145 Sep 17 08:36 runs/20260916_222606_bc_full_real_v2/checkpoint_step40500.pt
+== LAST LOG LINES ==
+1789624922 2026-09-17T00:02:02 guard started (pid 80225)
+1789658193 2026-09-17T09:16:33 STOPPED_BY_USER present -- guard exiting

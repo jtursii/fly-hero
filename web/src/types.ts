@@ -27,6 +27,7 @@ export interface Brain {
   pos_source_counts: Record<string, number>;
   checkpoint_step: number;
   activity_format: string;
+  flow_edges: { count: number; format: string; selection: string };
   attribution: { connectome: string; citations: string[]; license: string };
   songs: SongSummary[];
 }
@@ -76,6 +77,9 @@ export interface BrainAssets {
   classes: Uint8Array;
   /** Uint8 [N] D15 provenance: 0 soma, 1 anchor, 2 none. */
   posSource: Uint8Array;
+  /** Int32 [E, 3]: presynaptic slot, postsynaptic neuron index, edge sign.
+   *  Real FlyWire edges -- the brain panel's signal lines. */
+  flowEdges: Int32Array;
 }
 
 /** The light per-song files: everything the highway and transport need. */
@@ -88,8 +92,8 @@ export interface SongLight {
   probs: Uint8Array;
 }
 
-/** The heavy per-song files. Not fetched yet -- the brain, retina and
- *  oscilloscope panels are placeholders until Sessions 2-4. */
+/** The heavy per-song files: fetched only once a song is selected (D45),
+ *  and only by the panels that need them (the brain, today). */
 export interface SongHeavy {
   /** Uint8 [F20, K/2], 4-bit: slot 2i low nibble, 2i+1 high nibble. */
   activity: Uint8Array;

@@ -9,6 +9,8 @@ Writes, under `web_dir`:
                        soma-else-anchor resolution).
   data/classes.bin     Uint8 [N] super_class_id.
   data/pos_source.bin  Uint8 [N] D15 provenance: 0 soma, 1 anchor, 2 none.
+  data/flow_edges.bin  Int32 [E, 3], real edges for the site's signal lines
+                       (presynaptic slot, postsynaptic neuron, sign).
   data/songs/<id>/manifest.json, activity.bin, retina.bin, actions.bin,
                   probs.bin, scope.bin, events.json
   audio/<id>.mp3       128 kbps full mix, D37 (showcase songs only, private
@@ -104,6 +106,58 @@ def choose_slots(activity_by_song: list[np.ndarray], dn_idx: np.ndarray, input_i
     return dict(slot_idx=slot_idx, kinds=kinds, n_dn=len(dn_idx), n_input=len(photo_sample), n_variance=n_fill)
 
 
+#: super_class names grouped into the three stages the site draws signal
+#: lines between. Everything not listed is "central".
+FLOW_OPTIC = ("optic", "visual_projection", "visual_centrifugal", "sensory")
+FLOW_DN = ("descending",)
+#: How many edges of each (from-stage, to-stage) kind to keep, highest
+#: syn_count first. The three forward-pathway kinds are uncapped (there are
+#: only 747 of them); the intra-stage ones are capped so the lines stay
+#: legible and the file stays small.
+FLOW_BUDGET = {(0, 1): None, (1, 2): None, (0, 2): None, (0, 0): 1000, (1, 1): 400}
+
+
+def flow_edges(graph, slot_idx: np.ndarray, super_class_names: list[str]) -> np.ndarray:
+    """Real connectome edges for the site's signal lines -> Int32 [E, 3] of
+    (presynaptic slot, postsynaptic neuron index, sign).
+
+    Every edge here is a real FlyWire edge with its real sign; nothing is
+    synthesised. The selection rule is *presynaptic neuron is one of the K
+    recorded slots*, because the site colours a line by the recorded
+    activity of the neuron the signal leaves from -- the postsynaptic
+    neuron need not be recorded, and usually isn't (only 198 edges have
+    both ends recorded, and none of those run optic -> central).
+
+    Kept, highest syn_count first: every optic->central, central->DN and
+    optic->DN edge, plus FLOW_BUDGET's sample of the intra-optic and
+    intra-central ones so the optic lobes are not bare.
+    """
+    sc = graph["super_class_id"]
+    name_to_id = {n: i for i, n in enumerate(super_class_names)}
+    stage = np.ones(len(sc), dtype=np.int8)  # 1 = central
+    stage[np.isin(sc, [name_to_id[n] for n in FLOW_OPTIC if n in name_to_id])] = 0
+    stage[np.isin(sc, [name_to_id[n] for n in FLOW_DN if n in name_to_id])] = 2
+
+    slot_of = np.full(len(sc), -1, dtype=np.int64)
+    slot_of[slot_idx] = np.arange(len(slot_idx))
+    pre, post = graph["pre"], graph["post"]
+    keep = slot_of[pre] >= 0
+    pre, post = pre[keep], post[keep]
+    syn, sign = graph["syn_count"][keep], graph["sign"][keep]
+    kinds = list(zip(stage[pre].tolist(), stage[post].tolist()))
+    kinds = np.array([k[0] * 3 + k[1] for k in kinds], dtype=np.int64)
+
+    rows = []
+    for (a, b), budget in FLOW_BUDGET.items():
+        idx = np.flatnonzero(kinds == a * 3 + b)
+        # Deterministic: strongest connections first, ties broken by edge id.
+        idx = idx[np.lexsort((idx, -syn[idx]))]
+        if budget is not None:
+            idx = idx[:budget]
+        rows.append(np.stack([slot_of[pre[idx]], post[idx], sign[idx]], axis=1))
+    return np.concatenate(rows).astype(np.int32)
+
+
 def normalize_positions(pos_nm: np.ndarray) -> np.ndarray:
     """Centered on the centroid, scaled so the farthest neuron sits at
     radius 1 -- the site's camera framing assumes this."""
@@ -167,6 +221,9 @@ def main() -> None:
     normalize_positions(graph["pos_nm"]).tofile(data_dir / "positions.bin")
     graph["super_class_id"].astype(np.uint8).tofile(data_dir / "classes.bin")
     graph["pos_source_id"].astype(np.uint8).tofile(data_dir / "pos_source.bin")
+    flow = flow_edges(graph, slot_idx, meta["super_class_names"])
+    flow.tofile(data_dir / "flow_edges.bin")
+    print(f"flow edges: {len(flow)} real connections from recorded neurons")
 
     songs_out = []
     for s in rec_meta["songs"]:
@@ -234,6 +291,13 @@ def main() -> None:
         pos_source_counts=meta["pos_source_counts"],
         checkpoint_step=rec_meta["step"],
         activity_format="uint8 [frames, slots/2], 4-bit: slot 2i low nibble, 2i+1 high nibble, level/15 = rate",
+        flow_edges=dict(
+            count=int(len(flow)),
+            format="int32 [E, 3]: presynaptic slot, postsynaptic neuron index, sign (+1 excitatory, -1 inhibitory)",
+            selection="real FlyWire edges whose presynaptic neuron is a recorded slot; "
+                      "every optic->central, central->DN and optic->DN edge, plus the "
+                      f"{FLOW_BUDGET[(0, 0)]} / {FLOW_BUDGET[(1, 1)]} strongest intra-optic / intra-central ones",
+        ),
         attribution=ATTRIBUTION, songs=songs_out,
     )
     (data_dir / "brain.json").write_text(json.dumps(brain, separators=(",", ":")))
