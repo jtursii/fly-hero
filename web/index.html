@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fly Hero — a fruit-fly connectome plays Clone Hero</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">FLY<span>HERO</span></div>
+        <div class="tagline">
+          A rate model of the adult <i>Drosophila</i> brain, wired from the FlyWire v783
+          connectome, playing charts it learned on &mdash; replay only.
+          <span class="ckpt">checkpoint step <b id="ckpt">&mdash;</b></span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel brain-panel" id="brain-panel">
+          <h2 class="panel-title">Connectome <span class="meta" id="brain-meta">loading&hellip;</span></h2>
+          <canvas id="brain-canvas"></canvas>
+          <div class="placeholder-tag">PLACEHOLDER &middot; Session 2 &mdash; activity animation, bloom, input/DN highlight</div>
+        </section>
+
+        <section class="crt-column">
+          <div class="crt">
+            <div class="crt-screen">
+              <canvas id="highway"></canvas>
+              <div class="crt-scanlines"></div>
+              <div class="crt-glass"></div>
+            </div>
+            <div class="crt-chin">
+              <span class="crt-brand">FLYWIRE</span>
+              <span class="crt-led" id="crt-led"></span>
+            </div>
+          </div>
+          <div class="stats" id="stats">
+            <div class="stat"><span class="k">hit rate</span><span class="v" id="s-hit">&mdash;</span></div>
+            <div class="stat"><span class="k">notes hit</span><span class="v" id="s-notes">&mdash;</span></div>
+            <div class="stat"><span class="k">overstrums/min</span><span class="v" id="s-over">&mdash;</span></div>
+            <div class="stat"><span class="k">difficulty</span><span class="v" id="s-diff">&mdash;</span></div>
+            <div class="stat"><span class="k">this song</span><span class="v" id="s-seen">&mdash;</span></div>
+          </div>
+        </section>
+
+        <div class="aux-row">
+          <section class="panel small" id="eyes-panel">
+            <h2 class="panel-title">Fly's-eye view</h2>
+            <div class="placeholder-body">
+              <div class="placeholder-tag">PLACEHOLDER &middot; Session 3 &mdash; retina lattice from <code>retina.bin</code></div>
+            </div>
+          </section>
+          <section class="panel small" id="dn-panel">
+            <h2 class="panel-title">Decision bars</h2>
+            <div class="placeholder-body">
+              <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 6 readout probabilities from <code>probs.bin</code></div>
+            </div>
+          </section>
+          <section class="panel small" id="scope-panel">
+            <h2 class="panel-title">Oscilloscope</h2>
+            <div class="placeholder-body">
+              <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 20 s ring buffer from <code>scope.bin</code></div>
+            </div>
+          </section>
+          <section class="panel small" id="stage-panel">
+            <h2 class="panel-title">Stage</h2>
+            <div class="placeholder-body">
+              <div class="placeholder-tag">PLACEHOLDER &middot; Session 5 &mdash; 3D fly, stool, controller (illustration, not data)</div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer class="transport">
+        <div class="songs" id="songs"></div>
+        <button class="play" id="play" disabled aria-label="play/pause">&#9654;</button>
+        <div class="rates" id="rates"></div>
+        <div class="scrub">
+          <input type="range" id="scrubber" min="0" max="1" step="0.001" value="0" disabled />
+        </div>
+        <div class="readouts">
+          <span class="time" id="time">0:00 / 0:00</span>
+          <span class="counter" id="counter">&mdash;</span>
+          <span class="sync" id="sync" title="master clock minus audio clock">sync &mdash;</span>
+        </div>
+      </footer>
+    </div>
+
+    <audio id="audio" preload="auto"></audio>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
