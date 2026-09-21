@@ -243,18 +243,41 @@ class ConnectomeBrain(nn.Module):
         v_next = v + (self.dt / tau) * (-v + syn + bias + i_in)
         return v_next, r
 
+    def _frame_step(
+        self, v: torch.Tensor, i_photo: torch.Tensor, n_substeps: int, collect_all_rates: bool
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """The one implementation behind frame_step/frame_step_recorded.
+        collect_all_rates additionally averages the *whole population's*
+        rate over the frame's substeps (for export/record.py); it never
+        changes the math or the order of operations, so the recorded run is
+        the same run the eval path produces."""
+        dn_rates = []
+        all_rates = []
+        for _ in range(n_substeps):
+            v, r = self.step(v, i_photo)
+            dn_rates.append(r[:, self.dn_idx])
+            if collect_all_rates:
+                all_rates.append(r)
+        dn_rate_mean = torch.stack(dn_rates, dim=0).mean(dim=0)
+        all_rate_mean = torch.stack(all_rates, dim=0).mean(dim=0) if collect_all_rates else None
+        return v, dn_rate_mean, all_rate_mean
+
     def frame_step(
         self, v: torch.Tensor, i_photo: torch.Tensor, n_substeps: int = 2
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Runs n_substeps holding i_photo fixed (one 60Hz frame's worth of
         input at dt=1/120s). Returns (v_next, dn_rate_mean[B, n_dn]) -- the
         readout's only legal input (invariant 2)."""
-        dn_rates = []
-        for _ in range(n_substeps):
-            v, r = self.step(v, i_photo)
-            dn_rates.append(r[:, self.dn_idx])
-        dn_rate_mean = torch.stack(dn_rates, dim=0).mean(dim=0)
+        v, dn_rate_mean, _ = self._frame_step(v, i_photo, n_substeps, collect_all_rates=False)
         return v, dn_rate_mean
+
+    def frame_step_recorded(
+        self, v: torch.Tensor, i_photo: torch.Tensor, n_substeps: int = 2
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """frame_step plus the mean rate of every neuron over the frame's
+        substeps [B, N] -- export-only; the readout still sees DNs alone."""
+        v, dn_rate_mean, all_rate_mean = self._frame_step(v, i_photo, n_substeps, collect_all_rates=True)
+        return v, dn_rate_mean, all_rate_mean
 
     def forward(self, v: torch.Tensor, i_photo: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Alias for step(), solely so torch.func.functional_call can drive

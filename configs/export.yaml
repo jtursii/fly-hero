@@ -1,0 +1,26 @@
+# Phase 6 (export/record.py, export/export_web.py, export/validate_export.py).
+# Model/game configs come from the checkpoint's own run dir (D43's
+# checkpoint_step42000.pt), exactly as eval/evaluate.py resolves them.
+processed_dir: "data/processed"
+web_dir: "web/public"
+seed: 0
+
+# Same lead-in/tail as eval/evaluate.py, so the recorded hit_rate is the
+# number the showcase scoring pass reported for these songs.
+pre_roll_s: 1.0
+post_roll_s: 1.0
+
+activity_fps: 20          # D44: activity/retina streams are 20 Hz; actions/probs/scope stay 60 Hz
+activity_slots: 4096      # D44: K, 4-bit packed (2 slots per byte)
+retina_channels: 512      # D44: displayed retina points, subsampled from the 11,118 photoreceptors
+audio_bitrate: "128k"     # D37: full-mix MP3 for the showcase songs only
+
+# D44 (user decision 2026-09-21): all three are train-split and therefore
+# tagged "practiced"; this bends invariant 5 deliberately.
+showcase_songs:
+  - song_id: "da1355670f921411"   # Linkin Park - What I've Done (train)
+    difficulty: "Medium"
+  - song_id: "480574e3a561e0c9"   # Metallica - Nothing Else Matters (train)
+    difficulty: "Medium"
+  - song_id: "db92a6f903736fdd"   # Coldplay - Yellow (train)
+    difficulty: "Medium"

@@ -37,6 +37,20 @@ class ConnectomeBrainPolicy(nn.Module):
         logits = self.readout(dn_rate_mean)
         return new_state, logits
 
+    def step_frame_recorded(
+        self, state: torch.Tensor, frame_uint8: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """step_frame plus the intermediates export/record.py needs:
+        (new_state, logits, i_photo[B, n_input], all_rate_mean[B, N]). The
+        computation is identical to step_frame's -- a test asserts the two
+        produce bit-identical logits on the same clip."""
+        i_photo = self.retina.step(frame_uint8).to(dtype=self.brain.dtype)
+        new_state, dn_rate_mean, all_rate_mean = self.brain.frame_step_recorded(
+            state, i_photo, n_substeps=self.substeps_per_frame
+        )
+        logits = self.readout(dn_rate_mean)
+        return new_state, logits, i_photo, all_rate_mean
+
     def readout_parameters(self):
         return self.readout.parameters()
 
