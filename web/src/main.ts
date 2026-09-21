@@ -12,6 +12,7 @@ import {
 } from "./data.ts";
 import { Highway } from "./highway.ts";
 import { BrainView } from "./brain.ts";
+import { RetinaEncoder, RetinaView } from "./retina.ts";
 import type { BrainAssets, GameEvent, Manifest, SongLight } from "./types.ts";
 
 const RATES: Rate[] = [0.25, 1, 2];
@@ -26,6 +27,7 @@ const el = {
   ckpt: $("ckpt"),
   credit: $("credit"),
   brainCanvas: $<HTMLCanvasElement>("brain-canvas"),
+  eyesCanvas: $<HTMLCanvasElement>("eyes-canvas"),
   bActive: $("b-active"),
   bActiveK: $("b-active-k"),
   bMean: $("b-mean"),
@@ -51,6 +53,7 @@ const el = {
 const clock = new MasterClock();
 const highway = new Highway(el.highway);
 let brainView: BrainView | null = null;
+let retinaView: RetinaView | null = null;
 let assets: BrainAssets | null = null;
 let song: SongLight | null = null;
 let currentId: string | null = null;
@@ -95,6 +98,7 @@ async function selectSong(id: string): Promise<void> {
   clock.pause();
   highway.clearSong();
   brainView?.setSong(null, null);
+  retinaView?.setSong(null);
   song = null;
   syncSongButtons(true);
 
@@ -121,6 +125,9 @@ async function selectSong(id: string): Promise<void> {
     el.scrubber.disabled = false;
     el.play.disabled = false;
 
+    // The retina is derived from the manifest's notes, so the panel is live
+    // as soon as the light files land -- it never waits on the recording.
+    retinaView?.setSong(manifest);
     el.crtTitle.textContent =
       `${manifest.artist} — ${manifest.title} · ${manifest.difficulty}`.toUpperCase();
     el.sHit.textContent = (manifest.hit_rate * 100).toFixed(1) + "%";
@@ -197,6 +204,7 @@ function frame(nowMs: number): void {
 
   highway.draw(t);
   brainView?.render(t);
+  retinaView?.render(t);
 
   el.play.innerHTML = clock.isPlaying ? "&#10073;&#10073;" : "&#9654;";
   el.led.classList.toggle("on", clock.isPlaying);
@@ -257,6 +265,7 @@ function wireTransport(): void {
   const onResize = () => {
     highway.resize();
     brainView?.resize();
+    retinaView?.resize();
   };
   window.addEventListener("resize", onResize);
   // The CRT and the brain canvas are both sized by the grid, so watch the
@@ -264,6 +273,7 @@ function wireTransport(): void {
   const ro = new ResizeObserver(onResize);
   ro.observe(el.highway.parentElement!);
   ro.observe(el.brainCanvas.parentElement!);
+  ro.observe(el.eyesCanvas.parentElement!);
 }
 
 async function boot(): Promise<void> {
@@ -284,7 +294,12 @@ async function boot(): Promise<void> {
   // ?nobrain=1 skips the WebGL panel. scripts/check_sync.mjs uses it so the
   // clock is measured on its own: headless Chromium software-renders 139k
   // points at well under 60 fps, which would swamp the numbers.
+  // ?nobrain=1 skips the two panels that draw every frame (the WebGL
+  // connectome and the 2D eyes). scripts/check_sync.mjs uses it so the clock
+  // is measured on its own: headless Chromium software-renders both far
+  // under 60 fps, which would swamp the numbers.
   if (!new URLSearchParams(location.search).has("nobrain")) {
+    retinaView = new RetinaView(el.eyesCanvas, b.retina_display_pos);
     try {
       brainView = new BrainView(el.brainCanvas, assets);
     } catch (err) {
@@ -305,6 +320,8 @@ declare global {
       audio: HTMLAudioElement;
       selectSong: (id: string) => Promise<void>;
       getBrain: () => BrainView | null;
+      getRetina: () => RetinaView | null;
+      makeRetinaEncoder: (pos: [number, number][]) => RetinaEncoder;
       getSong: () => SongLight | null;
       getAssets: () => BrainAssets | null;
     };
@@ -315,6 +332,10 @@ window.flyhero = {
   audio: el.audio,
   selectSong,
   getBrain: () => brainView,
+  getRetina: () => retinaView,
+  // scripts/check_retina.mjs builds its own encoder with this and compares
+  // it against retina.bin; the panel's own encoder is left alone.
+  makeRetinaEncoder: (pos: [number, number][]) => new RetinaEncoder(pos),
   getSong: () => song,
   getAssets: () => assets,
 };

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check:sync": "node scripts/check_sync.mjs",
     "check:brain": "node scripts/check_brain.mjs",
+    "check:retina": "node scripts/check_retina.mjs",
     "shots": "node scripts/shots.mjs"
   },
   "dependencies": {

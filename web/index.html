@@ -93,9 +93,15 @@
 
           <section class="panel eyes-panel" id="eyes-panel">
             <h2 class="panel-title">Through the fly's eyes <span class="meta">&middot; 11,118 photoreceptors</span></h2>
-            <span class="panel-note">both compound eyes</span>
-            <div class="placeholder-body">
-              <div class="placeholder-tag">PLACEHOLDER &middot; Session 3 &mdash; retina lattice from <code>retina.bin</code></div>
+            <span class="panel-note">512 shown &middot; each eye covers its own half of the screen</span>
+            <canvas id="eyes-canvas"></canvas>
+            <div class="eyes-caption">
+              <span class="lead">This is what the fly actually sees. The CRT beside it is for viewers.</span>
+              <span class="legend">
+                <i class="dot pos"></i>light arriving
+                <i class="dot neg"></i>light leaving
+                <i class="dot rest"></i>at rest
+              </span>
             </div>
           </section>
 
