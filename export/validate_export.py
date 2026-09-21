@@ -6,7 +6,7 @@ Checks, in order:
      (invariant 4's one implementation). The resulting hit_rate must equal
      the manifest's exactly -- this is the check that the *exported* bytes,
      not just the in-memory recording, reproduce the reported number.
-  2. Size budgets (PLAN: <= 15 MB per song, <= 60 MB total under data/).
+  2. Size budgets (D45: <= 21 MB per song, <= 60 MB total under data/).
   3. Audio placement: the only audio under web/ may be the D37 showcase
      MP3s, one per exported song, and nothing else.
   4. Every file the manifests reference exists and has the length the
@@ -28,7 +28,7 @@ from flyhero.game.song import NOTE_DTYPE
 from flyhero.utils.config import load_config
 
 MB = 1024 * 1024
-PER_SONG_BUDGET_MB = 15.0
+PER_SONG_BUDGET_MB = 21.0  # D45 (was PLAN's 15.0)
 TOTAL_BUDGET_MB = 60.0
 AUDIO_SUFFIXES = {".mp3", ".ogg", ".wav", ".opus", ".m4a", ".flac", ".aac", ".wma"}
 

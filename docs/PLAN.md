@@ -299,7 +299,7 @@ If the gate still fails, showcase at Easy and document it honestly.
    - Tone.js `PluckSynth` with one pitch per lane, played on hit events. A muted thud on misses. Starts only after a user click.
    - Optional, time-box 1 h: a "Load your own audio file" picker. The chosen file plays locally in the browser, synced using the manifest's audio offset, and is never uploaded.
 7. **Master clock:** a single playhead in seconds drives every view; scrubbing seeks all of them.
-8. **Performance:** fetch song data lazily. 60 fps on an M-series laptop. On mobile, reduce point size and disable bloom.
+8. **Performance:** fetch each song's `data/songs/<id>/` **only when that song is selected** (D45 makes this load-bearing, not an optimization: per-song size is up to 21 MB, so initial load must pull only `brain.json` + `positions.bin`/`classes.bin`/`pos_source.bin`). 60 fps on an M-series laptop. On mobile, reduce point size and disable bloom.
 9. **About modal:**
    - Plain-language explanation.
    - FlyWire citation (Dorkenwald et al. 2024; Schlegel et al. 2024; CC BY 4.0) and charter credits.
@@ -309,7 +309,8 @@ If the gate still fails, showcase at Easy and document it honestly.
 10. **Deploy:**
     - Push to GitHub.
     - Import into Vercel with root `web`, preset Vite, output `dist`.
-    - `vercel.json` with long cache headers for `/data/*`.
+    - `vercel.json` with long cache headers for `/data/*` and `/audio/*` (written in Phase 6).
+    - **Verify compression on the first deploy** (D45): `curl -sI -H 'Accept-Encoding: br, gzip' <url>/data/songs/<id>/activity.bin | grep -i content-encoding`. Vercel auto-compresses by content type and `application/octet-stream` may not be included; compression cannot be forced from `vercel.json` (a `Content-Encoding` header without a compressed body would be a lie). If the header is absent, ship pre-compressed `.gz` siblings and decompress with `DecompressionStream('gzip')` in the client. Gzipped, the largest song is 10.9 MB vs 20.4 MB raw.
 
 **Gate G7**
 - Production URL loads with no console errors.
