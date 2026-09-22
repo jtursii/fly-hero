@@ -36,9 +36,18 @@
  *          node scripts/check_layout.mjs [url]
  */
 
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
 
 const URL = process.argv[2] ?? "http://localhost:5173/";
+/** D62: the site ships to Safari, so the checks have to be runnable on
+ *  WebKit as well as Chromium -- `BROWSER=webkit npm run check:layout`.
+ *  Playwright's WebKit is not Safari, but it is the same engine family and
+ *  it catches the whole class of "renders in Blink, not in WebKit" bugs
+ *  that a Chromium-only suite cannot see at all. */
+const ENGINE_NAME = process.env.BROWSER ?? "chromium";
+const ENGINES = { chromium, webkit };
+const ENGINE = ENGINES[ENGINE_NAME];
+if (!ENGINE) throw new Error(`BROWSER must be one of ${Object.keys(ENGINES).join(", ")}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** The desktop sizes the fix is required to hold at: three MacBook widths
@@ -50,10 +59,14 @@ const VIEWPORTS = [
   { width: 1920, height: 1080 },
 ];
 
-const browser = await chromium.launch({
+const browser = await ENGINE.launch({
   headless: false,
-  args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"],
+  // Chromium-only flags; WebKit rejects unknown switches.
+  ...(ENGINE_NAME === "chromium"
+    ? { args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"] }
+    : {}),
 });
+console.log(`engine: ${ENGINE_NAME} ${browser.version()}`);
 
 let allOk = true;
 const problems = [];

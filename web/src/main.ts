@@ -311,9 +311,26 @@ function setQuality(q: Quality): void {
 
 /** The glyph is also set every frame, but a click can land while the frame
  *  loop is stalled (a song's 11-20 MB recording downloading, say), and a
- *  button that does not react reads as a missed click. */
+ *  button that does not react reads as a missed click.
+ *
+ *  D62: **only when it changes.** This used to assign `innerHTML`
+ *  unconditionally from the frame loop -- 60 reparses a second, replacing
+ *  the text node inside the very button the user is trying to click. Chromium
+ *  tolerates it; WebKit does not reliably, and a mousedown/mouseup pair that
+ *  straddles one of those replacements can lose its click entirely. That is
+ *  the Safari "the pause button is finnicky" report: not a clock fault, a
+ *  swallowed click. Reproduced in Playwright's WebKit (`BROWSER=webkit`),
+ *  where six alternating real clicks came back as `110101` / `010010`.
+ *  `textContent` rather than `innerHTML`, too: these are single characters,
+ *  so there is no markup to parse. */
+let playGlyph = "";
+
 function syncPlayButton(): void {
-  el.play.innerHTML = clock.isPlaying ? "&#10073;&#10073;" : "&#9654;";
+  // U+23F8 is the pause bar pair; U+25B6 the play triangle.
+  const glyph = clock.isPlaying ? "\u2759\u2759" : "\u25B6";
+  if (glyph === playGlyph) return;
+  playGlyph = glyph;
+  el.play.textContent = glyph;
 }
 
 function toggleTransport(): void {

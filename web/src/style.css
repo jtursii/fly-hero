@@ -311,7 +311,17 @@ body::before {
      Small angles on purpose -- the highway is read through this glass, and
      anything stronger starts to cost note legibility (D57). */
   transform: rotateY(-3.2deg) rotateX(1.6deg);
-  transform-style: preserve-3d;
+  /* D62: no `transform-style: preserve-3d`. It was inert -- no child of the
+     CRT has a 3D transform to be positioned in its space -- but it was not
+     harmless: `.crt-screen` inside it sets `overflow: hidden`, and a
+     grouping property on a child of a preserve-3d parent is a combination
+     the spec leaves contradictory, so engines resolve it differently. That
+     is the kind of divergence that makes a layer render in one browser and
+     silently not in another, which is what Safari was reported doing to the
+     fly watermark. Verified inert before removing: a pixel diff of the
+     whole tube, preserve-3d vs flat, is **0 channels different in WebKit**
+     and 0.09 mean in Chromium (that residue is the `crt-flicker` animation
+     moving between the two shots, not this property). */
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.07),
     inset 0 -2px 6px rgba(0, 0, 0, 0.8),
