@@ -11,7 +11,8 @@
     "check:brain": "node scripts/check_brain.mjs",
     "check:retina": "node scripts/check_retina.mjs",
     "check:panels": "node scripts/check_panels.mjs",
-    "shots": "node scripts/shots.mjs"
+    "shots": "node scripts/shots.mjs",
+    "check:mobile": "node scripts/check_mobile.mjs"
   },
   "dependencies": {
     "three": "^0.169.0"

@@ -14,6 +14,11 @@
  *  clock is pulled back toward it every frame -- eased when the disagreement
  *  is small, snapped when it is large or when the audio has just been seeked.
  *
+ *  Pausing is the one place that does not ease at all. `pause()` stops the
+ *  element synchronously and parks the playhead on `audio.currentTime`
+ *  exactly; `play()` picks it up from there. See D55 -- easing across a
+ *  pause is what made resuming jump.
+ *
  *  `scripts/check_sync.mjs` measures the result in a real browser.
  */
 
@@ -22,8 +27,29 @@
 const SNAP_S = 0.025;
 /** Fraction of the remaining error taken back per frame when easing. */
 const EASE = 0.12;
+/** On resume, re-seat the element if it is further than this from the frozen
+ *  playhead. Normally 0: `pause()` froze the clock on the element's own
+ *  position, so there is nothing to seat. It only fires when the freeze
+ *  could not read the audio (song time outside the file, mid-seek). */
+const RESUME_SEEK_S = 0.01;
 
 export type Rate = 0.25 | 1 | 2;
+
+/** What `?debug=1` puts on screen, and what `scripts/check_sync.mjs` reads. */
+export interface ClockDebug {
+  want: boolean;
+  playing: boolean;
+  audioPaused: boolean;
+  audioCurrentTime: number;
+  clockTime: number;
+  /** Measured d(playhead)/d(wall clock) over the last ~0.5 s. */
+  advanceRate: number;
+  advancing: boolean;
+  drift: number;
+  syncing: boolean;
+  /** Where the last pause parked the playhead, in song seconds. */
+  frozenAt: number | null;
+}
 
 export class MasterClock {
   private t = 0;
@@ -54,6 +80,18 @@ export class MasterClock {
   /** True while `reconcile` is running, so there is only ever one in flight
    *  and the newest `want` is the one that wins. */
   private syncing = false;
+  /** Where the last pause parked the playhead, or null if it could not read
+   *  the audio. Cleared on the next play or seek. Debug readout, and the
+   *  value `reconcile` re-seats the element to on resume. */
+  private frozenAt: number | null = null;
+  /** Set by `play()`: hold the playhead where the pause left it until the
+   *  element is demonstrably rolling again. See `tick`. */
+  private holdForAudio = false;
+  /** Playhead and wall time at the last advance-rate sample, for the debug
+   *  overlay's "is the clock actually moving" line. */
+  private rateT = 0;
+  private rateWallMs = 0;
+  private advanceRate = 0;
 
   /** End of the recording in song seconds (includes the 1 s post-roll). */
   duration = 0;
@@ -121,12 +159,58 @@ export class MasterClock {
     if (want && this.duration > 0 && this.t >= this.duration - 0.05) this.seek(0);
     this.want = want;
     this.playing = want;
+    this.lastCT = -1;
+    this.started = false;
     if (want) {
       this.wallMs = performance.now();
-      this.lastCT = -1;
-      this.started = false;
+      this.frozenAt = null;
+      this.holdForAudio = true;
+    } else {
+      this.holdForAudio = false;
+      this.freeze();
     }
     void this.reconcile();
+  }
+
+  /** Stop the audio and park the playhead on its position, both right now.
+   *
+   *  D55: this used to be left to `reconcile`, which returns early while an
+   *  `audio.play()` promise is in flight -- so a pause landing in that
+   *  window never reached the element and the music played on with the
+   *  picture frozen. `HTMLMediaElement.pause()` is synchronous and aborts a
+   *  pending `play()` (rejecting it, which `reconcile` already catches), so
+   *  there is no reason to defer it.
+   *
+   *  The playhead is then parked on `audio.currentTime` rather than left
+   *  wherever the free-running interpolation had reached, because that
+   *  interpolation leads or lags the element by up to one render quantum.
+   *  Freezing on the interpolated value and resuming from the element's is
+   *  what produced the jump on resume. */
+  private freeze(): void {
+    const a = this.audio;
+    if (!a) return;
+    a.pause();
+    // Read the element only after it has stopped, and only when it is
+    // actually carrying the clock: outside the file's span (or mid-seek)
+    // `currentTime` says nothing about where the song is.
+    if (this.audioUsable()) {
+      const ct = a.currentTime;
+      // Chrome resumes a paused element at the next container packet
+      // boundary, not where it stopped -- measured at 53-68 ms ahead on
+      // these MP3s, which the clock then faithfully followed, and that was
+      // the visible jump on resume. Assigning `currentTime` its own value
+      // while paused resets that: the skip drops to under a millisecond.
+      // It is a seek to where the element already is, so it makes no sound,
+      // and it happens while stopped, where a glitch could not be heard
+      // anyway. (`fastSeek` does not fix it; measured too.)
+      a.currentTime = ct;
+      this.t = Math.min(Math.max(ct + this.audioOffset, 0), this.duration);
+      this.frozenAt = this.t;
+    } else {
+      this.frozenAt = null;
+    }
+    this.drift = 0;
+    this.advanceRate = 0;
   }
 
   /** Bring the audio element to `want`. Single-flight: a call made while one
@@ -147,7 +231,10 @@ export class MasterClock {
         }
         a.playbackRate = this.rate;
         const at = Math.max(0, this.t - this.audioOffset);
-        if (Math.abs(a.currentTime - at) > 0.05) a.currentTime = at;
+        // Normally a no-op on resume: `freeze()` parked the playhead on this
+        // element's own position, so `at` is already where it sits. It fires
+        // after a scrub, or when the freeze could not read the audio.
+        if (Math.abs(a.currentTime - at) > RESUME_SEEK_S) a.currentTime = at;
         try {
           await a.play();
         } catch {
@@ -179,6 +266,9 @@ export class MasterClock {
     this.drift = 0;
     this.lastCT = -1;
     this.started = false;
+    // A scrub replaces the pause's parked position with a chosen one.
+    this.frozenAt = null;
+    this.rateWallMs = 0;
     const a = this.audio;
     if (a) {
       const at = this.t - this.audioOffset;
@@ -190,13 +280,35 @@ export class MasterClock {
   /** Advance to wall-clock `nowMs` and re-lock to the audio. Call once per
    *  animation frame, before anything reads `time`. */
   tick(nowMs: number): void {
+    this.sampleAdvanceRate(nowMs);
     if (!this.playing) {
       this.wallMs = nowMs;
+      // Last line of defence for D55: whatever happened to the pause, a
+      // stopped clock must never sit over playing audio. Cheap (a property
+      // read) and it makes the failure self-correcting instead of silent.
+      // The element is brought back to the playhead rather than the
+      // playhead to the element: the user paused at `t`, so `t` is right
+      // and the audio's overrun is the error.
+      const a = this.audio;
+      if (a && !a.paused) {
+        a.pause();
+        const at = this.t - this.audioOffset;
+        if (at >= 0 && Math.abs(a.currentTime - at) > RESUME_SEEK_S) a.currentTime = at;
+      }
       return;
     }
     const dt = Math.min((nowMs - this.wallMs) / 1000, 0.25) * this.rate;
     this.wallMs = nowMs;
-    this.t += dt;
+    // An element told to play does not start instantly -- it stays paused for
+    // a few tens of milliseconds while the decoder spins up. Advancing the
+    // playhead through that window is exactly the jump D55 is about (53 ms
+    // measured), so on resume the clock waits where the pause left it until
+    // the audio is demonstrably rolling. Only when the audio *could* be
+    // carrying the clock: outside the file's span there is nothing to wait
+    // for and the post-roll has to keep running.
+    const waiting = this.holdForAudio && !this.started && this.audioUsable();
+    if (!waiting) this.t += dt;
+    if (this.started) this.holdForAudio = false;
 
     // The element can stop on its own -- an aborted play, a stall, a lost
     // decoder -- and the clock must not keep running over silence.
@@ -233,5 +345,38 @@ export class MasterClock {
       this.t = this.duration;
       this.pause();
     }
+  }
+
+  /** d(playhead)/d(wall) over ~0.5 s windows, so the debug overlay can say
+   *  whether the clock is moving rather than leaving it to be inferred from
+   *  a number that is changing too slowly to see. */
+  private sampleAdvanceRate(nowMs: number): void {
+    if (!this.rateWallMs) {
+      this.rateWallMs = nowMs;
+      this.rateT = this.t;
+      return;
+    }
+    const dw = (nowMs - this.rateWallMs) / 1000;
+    if (dw < 0.5) return;
+    this.advanceRate = (this.t - this.rateT) / dw;
+    this.rateWallMs = nowMs;
+    this.rateT = this.t;
+  }
+
+  /** Everything `?debug=1` shows. Reading it has no side effects. */
+  debug(): ClockDebug {
+    const a = this.audio;
+    return {
+      want: this.want,
+      playing: this.playing,
+      audioPaused: a ? a.paused : true,
+      audioCurrentTime: a ? a.currentTime : NaN,
+      clockTime: this.t,
+      advanceRate: this.advanceRate,
+      advancing: Math.abs(this.advanceRate) > 0.02,
+      drift: this.drift,
+      syncing: this.syncing,
+      frozenAt: this.frozenAt,
+    };
   }
 }

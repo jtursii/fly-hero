@@ -13,8 +13,14 @@
  *  an error below it is neither visible nor measurable. Reported alongside is
  *  the settle time after a scrub, which must be under half a second.
  *
- *  Headless Chromium software-renders at ~30 fps, so these are pessimistic;
- *  it is also why nothing here is a frame-rate measurement.
+ *  Runs **headed**, like check_brain.mjs and shots.mjs. It used to run
+ *  headless with `?nobrain=1` to keep the clock away from the WebGL panel's
+ *  software rendering, but D57's enlarged CRT put a 803x690 2D canvas on the
+ *  page, and software-rasterizing that starves rAF down to ~25 fps -- which
+ *  is a rendering measurement, not a clock one, and it swamped the 0.25x
+ *  case's 4.2 ms budget. Headed, on a real GPU, the whole page runs at 8.3 ms
+ *  a frame, so the budgets below measure the clock and nothing else.
+ *  Nothing here is a frame-rate measurement either way.
  *
  *  Usage:  npm run dev            # in another shell
  *          node scripts/check_sync.mjs [url]
@@ -22,7 +28,7 @@
 
 import { chromium } from "playwright";
 
-const URL = (process.argv[2] ?? "http://localhost:5173/") + "?nobrain=1";
+const URL = process.argv[2] ?? "http://localhost:5173/";
 const FRAME_MS = 1000 / 60;
 /** Steady-state budget: one animation frame of media time at the given rate. */
 const budgetFor = (rate) => FRAME_MS * rate;
@@ -32,12 +38,8 @@ const SETTLE_BUDGET_MS = 500;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const browser = await chromium.launch({
-  args: [
-    "--autoplay-policy=no-user-gesture-required",
-    "--mute-audio",
-    "--use-gl=angle",
-    "--use-angle=swiftshader",
-  ],
+  headless: false,
+  args: ["--autoplay-policy=no-user-gesture-required", "--mute-audio"],
 });
 const page = await browser.newPage({ viewport: { width: 1680, height: 1000 } });
 
@@ -203,8 +205,126 @@ async function transportChecks() {
   return ok;
 }
 
+// --- pause: freezes exactly, resumes with no jump and no drift (D55) -----
+//
+// Deliberately written against observable state only (`clock.time`,
+// `audio.paused`, `audio.currentTime`) and not against `clock.debug()`, so
+// it can be run unchanged on an older clock to confirm it fails there.
+async function pauseChecks() {
+  await page.evaluate((id) => window.flyhero.selectSong(id), songs[0].song_id);
+  await page.waitForFunction(() => window.flyhero.getSong() !== null, { timeout: 30000 });
+  await page.waitForFunction(() => window.flyhero.audio.readyState >= 2, { timeout: 60000 });
+
+  let ok = true;
+  const say = (good, msg) => { console.log(`${good ? "PASS " : "FAIL "} ${msg}`); if (!good) ok = false; };
+
+  // 1. Pause mid-song, hold 3 s, resume -- all sampled frame by frame in the
+  //    page, because the thing being measured is a one-frame discontinuity.
+  const r = await page.evaluate(async (holdMs) => {
+    const { clock, audio, getSong } = window.flyhero;
+    const offset = getSong().manifest.audio_offset_s;
+    const raf = () => new Promise((res) => requestAnimationFrame(res));
+    clock.setRate(1);
+    clock.seek(60);
+    clock.play();
+    for (let i = 0; i < 60; i++) await raf(); // let it lock to the audio
+    clock.pause();
+    await raf();
+    const frozen = { t: clock.time, ct: audio.currentTime, paused: audio.paused };
+    const hold = [];
+    const h0 = performance.now();
+    while (performance.now() - h0 < holdMs) {
+      await raf();
+      hold.push([clock.time, audio.currentTime, audio.paused]);
+    }
+    const w0 = performance.now();
+    clock.play();
+    const samples = []; // [ms since play(), clock time, audio time]
+    while (performance.now() - w0 < 1500) {
+      await raf();
+      samples.push([performance.now() - w0, clock.time, audio.currentTime]);
+    }
+    clock.pause();
+    return { offset, frozen, hold, samples };
+  }, 3000);
+
+  const { offset, frozen, hold, samples } = r;
+  const FRAME = FRAME_MS / 1000;
+
+  say(frozen.paused, `pause stops the audio element (audio.paused ${frozen.paused})`);
+  const freezeErr = Math.abs(frozen.t - (frozen.ct + offset));
+  say(freezeErr < 0.002,
+      `pause freezes the clock on audio.currentTime (|clock - audio| ${(freezeErr * 1000).toFixed(2)} ms, bar 2 ms)`);
+
+  const clockMoved = Math.max(...hold.map(([t]) => Math.abs(t - frozen.t)));
+  const audioMoved = Math.max(...hold.map(([, ct]) => Math.abs(ct - frozen.ct)));
+  const stayedPaused = hold.every(([, , p]) => p);
+  say(clockMoved === 0 && audioMoved === 0 && stayedPaused,
+      `nothing moves over a ${(3).toFixed(0)} s hold (${hold.length} frames: clock +${clockMoved.toFixed(4)} s, ` +
+      `audio +${audioMoved.toFixed(4)} s, stayed paused ${stayedPaused})`);
+
+  // No jump: the playhead may never be further along than the wall clock
+  // says it should be, allowing one frame for the sampler racing the app's
+  // own rAF, and it may never go backwards.
+  let maxExcess = -Infinity;
+  let minT = Infinity;
+  for (const [ms, t] of samples) {
+    maxExcess = Math.max(maxExcess, t - frozen.t - ms / 1000);
+    minT = Math.min(minT, t);
+  }
+  say(maxExcess <= 1.5 * FRAME && minT >= frozen.t - 1e-6,
+      `resume does not jump (max advance beyond real time ${(maxExcess * 1000).toFixed(1)} ms, ` +
+      `bar ${(1.5 * FRAME * 1000).toFixed(1)} ms = 1.5 frames; never went backwards: ${minT >= frozen.t - 1e-6})`);
+
+  // No drift: once settled, the playhead tracks the file as tightly as it
+  // does from a cold start.
+  const steady = samples.filter(([ms]) => ms > 500).map(([, t, ct]) => (t - (ct + offset)) * 1000);
+  const steadyMax = Math.max(...steady.map(Math.abs));
+  say(steadyMax <= FRAME_MS && steady.length > 10,
+      `no drift after resuming (|max| ${steadyMax.toFixed(1)} ms over ${steady.length} frames, budget ${FRAME_MS.toFixed(1)} ms)`);
+
+  // 2. The reported bug itself: a pause landing while an audio.play()
+  //    promise is still in flight. Chromium leaves play() promises pending
+  //    on a stalled or slow-starting element, and the old clock deferred the
+  //    element's pause() to a loop parked on that promise -- so the music
+  //    played on with the picture frozen, which is what "the pause button
+  //    does nothing" looked like.
+  const stuck = await page.evaluate(async () => {
+    const { clock, audio } = window.flyhero;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const realPlay = audio.play.bind(audio);
+    // Playback really starts; only the promise never settles.
+    audio.play = () => { void realPlay(); return new Promise(() => {}); };
+    try {
+      clock.seek(40);
+      clock.play();
+      await sleep(900);
+      const playing = !audio.paused;
+      clock.pause();
+      await sleep(900);
+      const after = { paused: audio.paused, ct: audio.currentTime, t: clock.time };
+      await sleep(900);
+      const later = { paused: audio.paused, ct: audio.currentTime, t: clock.time };
+      return { startedPlaying: playing, after, later };
+    } finally {
+      audio.play = realPlay;
+      clock.pause();
+    }
+  });
+  const crept = Math.abs(stuck.later.ct - stuck.after.ct);
+  say(stuck.startedPlaying && stuck.later.paused && crept < 0.05,
+      `pause stops the audio even with a play() promise in flight ` +
+      `(paused ${stuck.later.paused}, audio crept ${crept.toFixed(3)} s after the pause)`);
+
+  await page.evaluate(() => { window.flyhero.clock.pause(); window.flyhero.clock.seek(0); });
+  return ok;
+}
+
 console.log("\n--- transport ---");
 allOk = (await transportChecks()) && allOk;
+
+console.log("\n--- pause (D55) ---");
+allOk = (await pauseChecks()) && allOk;
 
 // Frames with the playhead parked on dense stretches, for eyeballing.
 await page.evaluate((id) => window.flyhero.selectSong(id), songs[0].song_id);

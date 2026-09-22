@@ -25,6 +25,14 @@ const PAST_U = -0.1875;
  *  the projective mapping gave it, then decelerates toward the bottom. */
 const PAST_EASE = 1.8;
 
+/** Canvas height the pixel-valued effects below were tuned at: the CRT was
+ *  528x502 CSS px at a 1680x1000 viewport before D57 enlarged it, leaving a
+ *  ~500x462 screen. Line widths, glow radii and flash bands are multiplied
+ *  by `this.u` (= h / TUNED_H) so they keep the same visual weight as the
+ *  tube grows -- a 3 px strikeline on a 900 px-tall screen reads as a hair,
+ *  not a strikeline. Everything else in this file was already proportional. */
+const TUNED_H = 462;
+
 const BURST_S = 0.42;
 const HIT_FLASH_S = 0.14;
 const OVERSTRUM_FLASH_S = 0.2;
@@ -87,15 +95,23 @@ export class Highway {
 
   resize(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const rect = this.canvas.getBoundingClientRect();
-    this.w = Math.max(1, Math.round(rect.width));
-    this.h = Math.max(1, Math.round(rect.height));
+    // clientWidth/Height, not getBoundingClientRect: D57 tilts the CRT with
+    // a 3D transform, and the rect is the *transformed* bounding box, which
+    // would size the backing store to the wrong aspect and blur the highway.
+    // These two are layout sizes and ignore the transform.
+    this.w = Math.max(1, this.canvas.clientWidth);
+    this.h = Math.max(1, this.canvas.clientHeight);
     this.canvas.width = Math.round(this.w * dpr);
     this.canvas.height = Math.round(this.h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   // --- geometry -----------------------------------------------------------
+
+  /** One "tuned pixel" at the current size -- see TUNED_H. */
+  private get u(): number {
+    return this.h / TUNED_H;
+  }
 
   private get horizonY(): number {
     return this.h * 0.08;
@@ -204,7 +220,7 @@ export class Highway {
       ctx.moveTo(this.xOf(edge, 1), yTop);
       ctx.lineTo(this.xOf(edge, uBot), yBot);
       ctx.strokeStyle = outer ? "rgba(110,190,255,0.30)" : "rgba(120,170,230,0.12)";
-      ctx.lineWidth = outer ? 2 : 1;
+      ctx.lineWidth = (outer ? 2 : 1) * this.u;
       ctx.stroke();
     }
     ctx.restore();
@@ -382,28 +398,32 @@ export class Highway {
     ctx.save();
     if (over > 0) {
       // Overstrum: the fly strummed with nothing to strum. Red, brief.
-      const g = ctx.createLinearGradient(0, y - 26, 0, y + 26);
+      const hy = 26 * this.u;
+      const hx = 20 * this.u;
+      const g = ctx.createLinearGradient(0, y - hy, 0, y + hy);
       g.addColorStop(0, `rgba(255,40,40,0)`);
       g.addColorStop(0.5, `rgba(255,50,50,${0.5 * over})`);
       g.addColorStop(1, `rgba(255,40,40,0)`);
       ctx.fillStyle = g;
-      ctx.fillRect(xL - 20, y - 26, xR - xL + 40, 52);
+      ctx.fillRect(xL - hx, y - hy, xR - xL + 2 * hx, 2 * hy);
     }
     if (hit > 0) {
-      const g = ctx.createLinearGradient(0, y - 18, 0, y + 18);
+      const hy = 18 * this.u;
+      const hx = 12 * this.u;
+      const g = ctx.createLinearGradient(0, y - hy, 0, y + hy);
       g.addColorStop(0, "rgba(200,240,255,0)");
       g.addColorStop(0.5, `rgba(220,245,255,${0.55 * hit})`);
       g.addColorStop(1, "rgba(200,240,255,0)");
       ctx.fillStyle = g;
-      ctx.fillRect(xL - 12, y - 18, xR - xL + 24, 36);
+      ctx.fillRect(xL - hx, y - hy, xR - xL + 2 * hx, 2 * hy);
     }
     ctx.beginPath();
     ctx.moveTo(xL, y);
     ctx.lineTo(xR, y);
-    ctx.lineWidth = 3 + 3 * Math.max(hit, over);
+    ctx.lineWidth = (3 + 3 * Math.max(hit, over)) * this.u;
     ctx.strokeStyle = over > 0.05 ? `rgba(255,90,80,0.95)` : `rgba(190,230,255,${0.7 + 0.3 * hit})`;
     ctx.shadowColor = over > 0.05 ? "#ff3b30" : "#8fd4ff";
-    ctx.shadowBlur = 12 + 22 * Math.max(hit, over);
+    ctx.shadowBlur = (12 + 22 * Math.max(hit, over)) * this.u;
     ctx.stroke();
     ctx.restore();
   }
@@ -435,7 +455,7 @@ export class Highway {
         g.addColorStop(1, LANE_DIM[lane]);
         ctx.fillStyle = g;
         ctx.shadowColor = LANE_COLORS[lane];
-        ctx.shadowBlur = 24;
+        ctx.shadowBlur = 24 * this.u;
       } else {
         const g = ctx.createRadialGradient(x, y - r * 0.2, 0, x, y, r);
         g.addColorStop(0, LANE_DIM[lane]);
@@ -490,7 +510,7 @@ export class Highway {
           const px = x + Math.cos(ang) * spd * a;
           const py = y + Math.sin(ang) * spd * a * 0.85;
           const pr = r * 0.13 * (1 - a) * (0.5 + hash01(seed + 202));
-          if (pr <= 0.2) continue;
+          if (pr <= 0.2 * this.u) continue;
           const eg = ctx.createRadialGradient(px, py, 0, px, py, pr * 2.4);
           eg.addColorStop(0, `rgba(255,240,200,${0.9 * fade})`);
           eg.addColorStop(0.5, `rgba(255,150,40,${0.55 * fade})`);

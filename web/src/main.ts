@@ -19,6 +19,25 @@ import type { BrainAssets, GameEvent, Manifest, SongLight } from "./types.ts";
 
 const RATES: Rate[] = [0.25, 1, 2];
 
+const params = new URLSearchParams(location.search);
+/** ?debug=1 -- the transport-state overlay (D55). */
+const debugOn = params.has("debug");
+/** The mobile tier (PLAN task 8): a narrow viewport or a touch-only pointer.
+ *  Both, because a tablet in landscape is wide but still not a laptop GPU. */
+const isMobile = window.matchMedia("(max-width: 900px), (pointer: coarse)").matches;
+
+/** Render tiers. `reduced` is the mobile default (smaller points, dimmer
+ *  glow, DPR capped); `minimal` is what a sustained slow frame demotes to --
+ *  the in-shader glow off and the flow lines dropped. There is no bloom pass
+ *  to disable: PLAN task 3's `UnrealBloomPass` was never built, and the glow
+ *  is a term in the point fragment shader (D56). */
+export type Quality = "full" | "reduced" | "minimal";
+let quality: Quality = isMobile ? "reduced" : "full";
+/** Consecutive frames over budget, for the demotion below. */
+let slowFrames = 0;
+const FRAME_BUDGET_MS = 22;
+const SLOW_FRAMES_TO_DEMOTE = 120;
+
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
   if (!el) throw new Error(`#${id} missing from index.html`);
@@ -50,6 +69,7 @@ const el = {
   counter: $("counter"),
   sync: $("sync"),
   audio: $<HTMLAudioElement>("audio"),
+  debug: $("debug"),
   sHit: $("s-hit"),
   sNotes: $("s-notes"),
   sOver: $("s-over"),
@@ -212,6 +232,7 @@ function buildRateButtons(): void {
 function frame(nowMs: number): void {
   if (lastFrameAt) frameMs += ((nowMs - lastFrameAt) - frameMs) * 0.05;
   lastFrameAt = nowMs;
+  maybeDemote();
   clock.tick(nowMs);
   const t = clock.time;
 
@@ -240,7 +261,48 @@ function frame(nowMs: number): void {
     el.sync.textContent = `sync ${ms >= 0 ? "+" : ""}${ms.toFixed(0)} ms`;
     el.sync.classList.toggle("bad", Math.abs(ms) > 40);
   }
+  if (debugOn) drawDebug();
   requestAnimationFrame(frame);
+}
+
+/** ?debug=1 (D55). Raw state, no smoothing and no rounding that could hide
+ *  the disagreement this overlay exists to show. */
+function drawDebug(): void {
+  const d = clock.debug();
+  const s = (b: boolean) => (b ? "yes" : "no ");
+  el.debug.textContent = [
+    `want          ${s(d.want)}   (what the button asked for)`,
+    `clock playing ${s(d.playing)}`,
+    `audio.paused  ${s(d.audioPaused)}${d.playing === d.audioPaused ? "   <-- DISAGREE" : ""}`,
+    `audio.currentTime ${d.audioCurrentTime.toFixed(4)}`,
+    `clock time        ${d.clockTime.toFixed(4)}`,
+    `clock - audio     ${((d.clockTime - d.audioCurrentTime - audioOffset()) * 1000).toFixed(1)} ms`,
+    `advancing     ${s(d.advancing)}  ${d.advanceRate.toFixed(3)}x wall`,
+    `drift         ${(d.drift * 1000).toFixed(1)} ms`,
+    `reconciling   ${s(d.syncing)}`,
+    `frozen at     ${d.frozenAt === null ? "-" : d.frozenAt.toFixed(4)}`,
+    `rate          ${clock.rate}x`,
+    `frame         ${frameMs.toFixed(1)} ms`,
+    `quality       ${quality}`,
+  ].join("\n");
+}
+
+const audioOffset = (): number => song?.manifest.audio_offset_s ?? 0;
+
+/** One-way demotion when the frame time will not come back under budget.
+ *  One way on purpose: promoting again would oscillate, because the cheaper
+ *  tier is what made the frames fast enough to promote from. */
+function maybeDemote(): void {
+  if (quality === "minimal") return;
+  slowFrames = frameMs > FRAME_BUDGET_MS ? slowFrames + 1 : 0;
+  if (slowFrames < SLOW_FRAMES_TO_DEMOTE) return;
+  slowFrames = 0;
+  setQuality(quality === "full" ? "reduced" : "minimal");
+}
+
+function setQuality(q: Quality): void {
+  quality = q;
+  brainView?.setQuality(q);
 }
 
 // --- boot -----------------------------------------------------------------
@@ -325,6 +387,7 @@ function wireTransport(): void {
 async function boot(): Promise<void> {
   wireTransport();
   buildRateButtons();
+  el.debug.hidden = !debugOn;
   highway.draw(0);
 
   assets = await loadBrainAssets();
@@ -347,7 +410,8 @@ async function boot(): Promise<void> {
   if (!new URLSearchParams(location.search).has("nobrain")) {
     retinaView = new RetinaView(el.eyesCanvas, b.retina_display_pos);
     try {
-      brainView = new BrainView(el.brainCanvas, assets);
+      brainView = new BrainView(el.brainCanvas, assets, { mobile: isMobile });
+      brainView.setQuality(quality);
     } catch (err) {
       console.warn("brain placeholder unavailable (no WebGL?)", err);
     }
@@ -372,6 +436,8 @@ declare global {
       getScope: () => ScopeView;
       getSong: () => SongLight | null;
       getAssets: () => BrainAssets | null;
+      getQuality: () => Quality;
+      setQuality: (q: Quality) => void;
     };
   }
 }
@@ -388,6 +454,8 @@ window.flyhero = {
   getScope: () => scopeView,
   getSong: () => song,
   getAssets: () => assets,
+  getQuality: () => quality,
+  setQuality,
 };
 
 void boot();

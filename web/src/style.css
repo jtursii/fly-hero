@@ -121,45 +121,19 @@ body::before {
   color: #43526b;
 }
 
-.placeholder-body { position: absolute; inset: 0; display: grid; place-items: center; padding: 30px 12px 12px; }
-
-.placeholder-tag {
-  font-size: 9.5px;
-  line-height: 1.6;
-  letter-spacing: 0.6px;
-  color: #5c6d8a;
-  text-align: center;
-  border: 1px dashed #263248;
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: rgba(10, 16, 26, 0.72);
-}
-.placeholder-tag code { color: #7d90ad; }
-
 /* --- stage -------------------------------------------------------------- */
 
+/* D57: the 3D fly is cut and the stage panel with it. The CRT is the hero of
+   the page and takes the whole left column, sized by height so it stays
+   fully visible, centred when the column is wider than its aspect ratio.
+   `perspective` here is what gives the tilt below its depth. */
 .stage-body {
-  position: absolute;
-  inset: 30px 16px 14px;
-  display: grid;
-  /* The fly gets a real slot, not a tile: ~40% of the stage (site plan S7). */
-  grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
-  gap: 18px;
-  align-items: center;
-  min-height: 0;
-}
-
-.fly-slot {
-  /* A real slot for the Session 5 fly, the same height as the CRT beside it. */
-  align-self: center;
-  width: 100%;
-  height: auto;
-  max-height: 100%;
-  aspect-ratio: 1 / 1.15;
   display: grid;
   place-items: center;
-  border: 1px dashed #212c3f;
-  border-radius: 8px;
+  min-height: 0;
+  min-width: 0;
+  perspective: 2200px;
+  perspective-origin: 50% 42%;
 }
 
 /* --- fly's-eye panel --------------------------------------------------- */
@@ -212,21 +186,28 @@ body::before {
 /* --- CRT --------------------------------------------------------------- */
 
 .crt {
-  /* Sized by the stage grid now, not by a full-height column. The bezel,
-     scanlines and glass are unchanged. */
-  align-self: center;
-  width: 100%;
-  max-height: 100%;
-  aspect-ratio: 4 / 3.8;
+  /* Fills the stage: height-led so the whole tube is always on screen, with
+     `max-width` taking over on short, wide viewports. */
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 4 / 3.5;
   display: flex;
   flex-direction: column;
-  padding: 14px 14px 0;
-  border-radius: 20px;
+  padding: 18px 18px 0;
+  border-radius: 24px;
   background: linear-gradient(170deg, #22252c 0%, #14161b 42%, #0c0e12 100%);
+  /* A physical TV, not a flat card: turned a few degrees off-axis and tipped
+     back, with the bezel's own highlight and a contact shadow underneath.
+     Small angles on purpose -- the highway is read through this glass, and
+     anything stronger starts to cost note legibility (D57). */
+  transform: rotateY(-3.2deg) rotateX(1.6deg);
+  transform-style: preserve-3d;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.07),
     inset 0 -2px 6px rgba(0, 0, 0, 0.8),
-    0 18px 45px rgba(0, 0, 0, 0.75);
+    -14px 10px 30px rgba(0, 0, 0, 0.55),
+    0 34px 70px rgba(0, 0, 0, 0.8);
   border: 1px solid #2b2f38;
 }
 
@@ -234,16 +215,33 @@ body::before {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  border-radius: 26px / 34px; /* the tube's corner curvature */
+  border-radius: 34px / 44px; /* the tube's corner curvature */
   overflow: hidden;
   background: #04060a;
   box-shadow:
     inset 0 0 0 2px #05070b,
-    inset 0 0 26px rgba(0, 0, 0, 0.95),
-    0 0 26px rgba(80, 170, 255, 0.10);
+    inset 0 0 34px rgba(0, 0, 0, 0.95),
+    0 0 40px rgba(80, 170, 255, 0.14);
 }
 
 #highway { display: block; width: 100%; height: 100%; }
+
+/* The channel logo: top-left inside the glass, small, clear of the highway's
+   trapezoid, and under the scanline and vignette layers so it is dimmed and
+   striped along with everything else on the tube. Its own halftone is the
+   asset's alpha channel (see scripts/convert_logo.py). */
+.crt-logo {
+  position: absolute;
+  top: 4.2%;
+  left: 3.4%;
+  width: 10%;          /* the 8-12% the brief asks for; scales with the CRT */
+  height: auto;
+  opacity: 0.65;
+  pointer-events: none;
+  /* Sits in the tube's light rather than on top of it. */
+  mix-blend-mode: screen;
+  filter: drop-shadow(0 0 6px rgba(140, 210, 255, 0.35));
+}
 
 .crt-scanlines {
   position: absolute;
@@ -501,12 +499,95 @@ button.play:hover:not(:disabled) { box-shadow: 0 0 14px rgba(111, 211, 255, 0.3)
 }
 .modal-close:hover { color: var(--text); }
 
+/* --- ?debug=1 overlay (D55) --------------------------------------------- */
+
+.debug {
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  z-index: 60;
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre;
+  color: #b7ffd9;
+  background: rgba(2, 8, 5, 0.88);
+  border: 1px solid #1f4a35;
+  border-radius: 6px;
+  pointer-events: none;
+}
+.debug[hidden] { display: none; }
+
+/* --- narrow screens ----------------------------------------------------- */
+
+/* One column, and the CRT stays at the top with the telemetry panels
+   stacked underneath it. The page scrolls here, so the CRT becomes
+   width-led: `height: 100%` against an auto-height row would collapse it. */
 @media (max-width: 1100px) {
   .grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
+  .stage-col { grid-template-rows: auto auto auto; }
   .tele-col { grid-template-rows: 320px 260px 220px; }
-  .stage-body { grid-template-columns: minmax(0, 1fr); }
-  .fly-slot { display: none; }
+  .stage-body { perspective: 1700px; }
+  .crt { height: auto; width: 100%; aspect-ratio: 4 / 3.3; }
   .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 0; }
-  html, body { overflow: auto; }
+  /* `height: auto` matters as much as `overflow: auto`: the base rule pins
+     html and body to 100%, so a taller #app overflowed a body that never
+     grew -- scrollHeight stayed at the viewport and everything below the
+     CRT was unreachable. */
+  html, body { height: auto; min-height: 100%; overflow: auto; }
   #app { height: auto; min-height: 100%; }
+}
+
+@media (max-width: 700px) {
+  #app { padding: 8px 10px; gap: 8px; }
+  .topbar { gap: 8px; }
+  .topbar .tagline { font-size: 10.5px; }
+  .topbar .credit { margin-left: 0; white-space: normal; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 0; padding: 10px 4px; }
+  .stat { padding: 0 8px; }
+  .stat .v { font-size: 15px; }
+  .stat.wide { text-align: left; }
+  /* Straight on: a rotateY here would cost usable width, which is the one
+     thing a phone has none of. The tip-back stays. */
+  .crt { aspect-ratio: 4 / 3.6; padding: 10px 10px 0; border-radius: 16px; transform: rotateX(1.2deg); }
+  .crt-screen { border-radius: 22px / 28px; }
+  .crt-chin { height: 20px; }
+  .transport .row { flex-wrap: wrap; }
+  .transport .row:last-child { gap: 8px; }
+  .readouts { gap: 8px; font-size: 10px; white-space: normal; }
+  /* A finger-sized scrubber; the thumb is the smallest target on the page. */
+  #scrubber { height: 28px; }
+  button.play { width: 44px; height: 44px; font-size: 16px; }
+  .tele-col { grid-template-rows: 280px 250px auto; }
+  .aux-row { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px 200px; }
+
+  /* The title and its note are both absolutely positioned, one flush left
+     and one flush right; at this width they ran into each other. The note
+     drops onto its own line below the title, and the panels' canvases and
+     captions move down to make room. */
+  .panel-note { top: 26px; left: 12px; right: 12px; text-align: left; line-height: 1.3; }
+  #eyes-canvas { inset: 46px 10px 56px; height: calc(100% - 102px); }
+  #dn-canvas, #scope-canvas { inset: 42px 12px 26px; height: calc(100% - 68px); }
+
+  /* The readouts float over the connectome. At this width the brain fills
+     the panel behind them, so they get a ceiling *and* a backdrop -- the
+     long denominator label ("active of 4,096 recorded...") is the honest
+     one (D49) and has to stay readable. */
+  .brain-stats {
+    top: 46px;
+    max-width: 66%;
+    padding: 6px 8px 8px 16px;
+    border-radius: 7px;
+    background: linear-gradient(90deg, rgba(7, 10, 17, 0) 0%, rgba(7, 10, 17, 0.86) 22%);
+  }
+  .brain-stats .v { font-size: 19px; }
+  .brain-stats .big { margin-bottom: 7px; }
+
+  .eyes-caption { flex-direction: column; align-items: flex-start; gap: 4px; bottom: 8px; }
+  .eyes-caption .dot { margin-left: 0; }
+  .eyes-caption .legend { gap: 10px; }
+
+  .debug { font-size: 9.5px; right: 6px; bottom: 6px; }
 }

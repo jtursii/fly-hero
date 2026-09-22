@@ -142,6 +142,12 @@ hit/notes-hit counters (replaying `events.json`, never re-scoring).
 
 ## 3. The 3D fly
 
+> **SUPERSEDED by D57 (2026-09-21, user decision): the 3D fly is cut
+> entirely.** No `fly.glb`, no stool, no controller, no task S7. The CRT
+> took the stage area instead and is now the hero of the page. §5 item 12
+> ("the fly, stool, controller are illustration") is void with it; the
+> About modal disclaims the CRT instead. Kept below as written.
+
 **Decided: stylized low-poly, authored in the pose, in Blender → glTF.**
 Fallback to three.js primitives behind a hard 2-hour box if the Blender work
 stalls. No CC-model licensing search — not worth the risk given almost none

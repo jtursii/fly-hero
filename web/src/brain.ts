@@ -42,6 +42,7 @@ const POINT_VS = /* glsl */ `
   uniform sampler2D uActB;
   uniform float uMix;
   uniform float uScale;
+  uniform float uSizeScale;  // < 1 on the mobile tiers (D56)
   varying vec3 vColor;
   varying float vGlow;
 
@@ -60,20 +61,22 @@ const POINT_VS = /* glsl */ `
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mv;
     // World-radius -> pixels: uScale is drawingBufferHeight / 2 tan(fov/2).
-    float size = aSlot < 0.0 ? 0.0030 : 0.0038 + 0.0130 * level;
+    float size = (aSlot < 0.0 ? 0.0030 : 0.0038 + 0.0130 * level) * uSizeScale;
     gl_PointSize = max(1.0, size * uScale / max(0.15, -mv.z));
   }
 `;
 
 const POINT_FS = /* glsl */ `
+  uniform float uGlow;       // 0 turns the glow off entirely (D56)
   varying vec3 vColor;
   varying float vGlow;
   void main() {
     // Soft round sprite; recorded neurons get a hotter core as they fire.
+    // This term is the site's "bloom": there is no post-process bloom pass.
     float d = length(gl_PointCoord - 0.5) * 2.0;
     float a = smoothstep(1.0, 0.25, d);
     if (a <= 0.003) discard;
-    gl_FragColor = vec4(vColor * (1.0 + 1.6 * vGlow * (1.0 - d)), a);
+    gl_FragColor = vec4(vColor * (1.0 + 1.6 * uGlow * vGlow * (1.0 - d)), a);
   }
 `;
 
@@ -134,12 +137,15 @@ export class BrainView {
   private frameA = -1;
   readonly stats: BrainStats = { active: 0, meanActivation: 0 };
 
-  constructor(canvas: HTMLCanvasElement, assets: BrainAssets) {
+  constructor(canvas: HTMLCanvasElement, assets: BrainAssets, opts: { mobile?: boolean } = {}) {
     const { brain, positions, classes, posSource } = assets;
     const n = brain.n_neurons;
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // D56: a phone's DPR is commonly 3, and 139k additive points at 3x is
+    // where the frame time actually goes, so the mobile tier caps it at 1.5.
+    const dprCap = opts.mobile ? 1.5 : 2;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, dprCap));
     this.camera = new THREE.PerspectiveCamera(40, 1, 0.01, 100);
     this.camera.position.set(0, 0, 1.9);
 
@@ -171,6 +177,8 @@ export class BrainView {
       uActB: { value: this.texB },
       uMix: { value: 0 },
       uScale: { value: 1 },
+      uSizeScale: { value: 1 },
+      uGlow: { value: 1 },
     };
 
     // slot lookup, and the per-neuron attributes the shaders read.
@@ -296,6 +304,17 @@ export class BrainView {
       azimuth: Math.atan2(this.camera.position.x, this.camera.position.z),
       autoRotate: this.controls.autoRotate,
     };
+  }
+
+  /** Render tier (D56). `reduced` shrinks the points and dims the glow;
+   *  `minimal` turns the glow off and drops the flow lines, which are the
+   *  only per-frame geometry besides the points. */
+  setQuality(q: "full" | "reduced" | "minimal"): void {
+    const size = q === "full" ? 1 : q === "reduced" ? 0.8 : 0.6;
+    const glow = q === "full" ? 1 : q === "reduced" ? 0.55 : 0;
+    this.uniforms.uSizeScale.value = size;
+    this.uniforms.uGlow.value = glow;
+    if (this.lines) this.lines.visible = q !== "minimal";
   }
 
   resize(): void {

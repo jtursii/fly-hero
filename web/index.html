@@ -32,28 +32,24 @@
             </div>
           </div>
 
-          <section class="panel stage-panel">
-            <h2 class="panel-title">Stage <span class="meta">&middot; over the shoulder</span></h2>
-            <div class="stage-body">
-              <div class="fly-slot" id="fly-slot">
-                <div class="placeholder-tag">
-                  [3D FLY &mdash; seated on a stool,<br />mini guitar controller in its forelegs,<br />facing the screen]
-                  <br /><br />PLACEHOLDER &middot; Session 5
-                </div>
+          <!-- D57: no panel chrome and no fly slot -- the CRT *is* the stage,
+               and it gets the whole area. -->
+          <div class="stage-body">
+            <div class="crt">
+              <div class="crt-screen">
+                <canvas id="highway"></canvas>
+                <!-- Inside the glass, under the scanlines and vignette, so it
+                     reads as part of the broadcast rather than an overlay. -->
+                <img class="crt-logo" src="/brand/flylogo.png" alt="" aria-hidden="true" />
+                <div class="crt-scanlines"></div>
+                <div class="crt-glass"></div>
               </div>
-              <div class="crt">
-                <div class="crt-screen">
-                  <canvas id="highway"></canvas>
-                  <div class="crt-scanlines"></div>
-                  <div class="crt-glass"></div>
-                </div>
-                <div class="crt-chin">
-                  <span class="crt-brand" id="crt-title">FLYWIRE</span>
-                  <span class="crt-led" id="crt-led"></span>
-                </div>
+              <div class="crt-chin">
+                <span class="crt-brand" id="crt-title">FLYWIRE</span>
+                <span class="crt-led" id="crt-led"></span>
               </div>
             </div>
-          </section>
+          </div>
 
           <footer class="transport">
             <div class="row">
@@ -175,8 +171,12 @@
             every inhibitory one (45,550), over the 20 seconds up to the playhead.
           </li>
           <li>
-            <b>The fly, the stool and the controller are an illustration.</b> Only the
-            connectome, eyes, decision and oscilloscope panels are recorded data.
+            <b>The CRT is a presentation, not a measurement.</b> The bezel, the scanlines,
+            the lane colors and the perspective are drawn for you. What is recorded is
+            which frets were held on each frame and when a note counted as hit, missed or
+            overstrummed &mdash; that is what the lit frets and the flashes come from. Only
+            the connectome, eyes, decision and oscilloscope panels show the model's own
+            signals.
           </li>
         </ul>
 
@@ -225,6 +225,9 @@
         </p>
       </div>
     </div>
+
+    <!-- ?debug=1 only (D55): the transport's actual state, unsmoothed. -->
+    <pre class="debug" id="debug" hidden></pre>
 
     <audio id="audio" preload="auto"></audio>
     <script type="module" src="/src/main.ts"></script>
