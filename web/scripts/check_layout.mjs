@@ -17,11 +17,15 @@
  *
  *  Asserted at each desktop viewport:
  *    - the page fits the viewport with no scrolling in either axis;
- *    - every control (play/pause, the three speeds, the scrubber, every song
- *      button, About) is fully inside the viewport;
+ *    - every control (play/pause, the three speeds, the scrubber, the volume
+ *      slider and its mute button, every song button, About) is fully inside
+ *      the viewport;
  *    - `elementFromPoint` at each control's centre is that control or a
  *      child of it -- nothing is painted over it;
- *    - the CRT does not overlap the transport or the stat strip.
+ *    - the CRT does not overlap the transport or the stat strip;
+ *    - pause survives repeated real mid-song clicks, and spacebar toggles;
+ *    - the volume slider reaches the audio element, mute round-trips to the
+ *      same level, and the level survives a reload.
  *
  *  Headed, like the other checks: a headless viewport is not the layout a
  *  real Chrome window has, and this file is about a real Chrome window.
@@ -119,6 +123,8 @@ for (const vp of VIEWPORTS) {
     add("play/pause", document.getElementById("play"));
     document.querySelectorAll(".rate-btn").forEach((b, i) => add(`speed ${b.textContent} (#${i})`, b));
     add("scrubber", document.getElementById("scrubber"));
+    add("volume", document.getElementById("volume"));
+    add("mute", document.getElementById("mute"));
     document.querySelectorAll(".song-btn").forEach((b, i) =>
       add(`song "${b.querySelector(".t").textContent}" (#${i})`, b));
     add("About", document.getElementById("about-open"));
@@ -210,6 +216,49 @@ for (const vp of VIEWPORTS) {
       `the playhead holds while paused (${pausedAt.toFixed(3)} -> ${stillAt.t.toFixed(3)} s ` +
       `over 1.2 s)`);
   say(stillAt.audioPaused, `the audio stays stopped while paused`);
+
+  // --- volume --------------------------------------------------------------
+  // Dragged, not assigned: the slider has to reach the audio element.
+  const volBox = await page.evaluate(() => {
+    const r = document.getElementById("volume").getBoundingClientRect();
+    return { x0: r.left + r.width * 0.9, x1: r.left + r.width * 0.25, y: r.top + r.height / 2 };
+  });
+  await page.mouse.move(volBox.x0, volBox.y);
+  await page.mouse.down();
+  await page.mouse.move(volBox.x1, volBox.y, { steps: 8 });
+  await page.mouse.up();
+  await sleep(200);
+  const vol = await page.evaluate(() => ({
+    slider: parseFloat(document.getElementById("volume").value),
+    audio: window.flyhero.audio.volume,
+    muted: window.flyhero.audio.muted,
+  }));
+  say(vol.audio < 0.5 && Math.abs(vol.audio - vol.slider) < 1e-6 && !vol.muted,
+      `dragging the volume slider sets the audio element ` +
+      `(slider ${vol.slider.toFixed(2)}, audio.volume ${vol.audio.toFixed(2)})`);
+
+  // Mute is a toggle that must come back to the same level, not to zero.
+  await page.click("#mute");
+  await sleep(150);
+  const muted = await page.evaluate(() => ({ m: window.flyhero.audio.muted, v: window.flyhero.audio.volume }));
+  await page.click("#mute");
+  await sleep(150);
+  const unmuted = await page.evaluate(() => ({ m: window.flyhero.audio.muted, v: window.flyhero.audio.volume }));
+  say(muted.m && !unmuted.m && Math.abs(unmuted.v - vol.slider) < 1e-6,
+      `mute toggles and restores the level (${vol.slider.toFixed(2)} -> muted -> ` +
+      `${unmuted.v.toFixed(2)})`);
+
+  // It has to survive a reload, which is the only reason to store it at all.
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForFunction(() => document.querySelectorAll(".song-btn").length > 0, { timeout: 30000 });
+  const restored = await page.evaluate(() => window.flyhero.audio.volume);
+  say(Math.abs(restored - vol.slider) < 1e-6,
+      `the level survives a reload (${restored.toFixed(2)})`);
+  // Back to a loaded song for the keyboard section below.
+  await page.evaluate((id) => window.flyhero.selectSong(id), songs[0].song_id);
+  await page.waitForFunction(() => window.flyhero.getSong() !== null, { timeout: 30000 });
+  await page.click("#play");
+  await sleep(250);
 
   // --- spacebar ------------------------------------------------------------
   // Pressed straight after a click, so #play still has focus: Space on a

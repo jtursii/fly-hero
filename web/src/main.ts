@@ -69,6 +69,8 @@ const el = {
   counter: $("counter"),
   sync: $("sync"),
   audio: $<HTMLAudioElement>("audio"),
+  volume: $<HTMLInputElement>("volume"),
+  mute: $<HTMLButtonElement>("mute"),
   debug: $("debug"),
   sHit: $("s-hit"),
   sNotes: $("s-notes"),
@@ -319,8 +321,57 @@ function toggleTransport(): void {
   syncPlayButton();
 }
 
+/** Volume lives on the audio element, not the clock: it is the one transport
+ *  control that changes nothing about the replay. Remembered per viewer
+ *  because being handed full volume again on every visit is the kind of
+ *  thing you only forgive once. `localStorage` throws in a private window,
+ *  so every access is guarded and the slider just starts at 1 instead. */
+const VOL_KEY = "flyhero.volume";
+
+function applyVolume(v: number, muted: boolean): void {
+  el.audio.volume = Math.min(Math.max(v, 0), 1);
+  el.audio.muted = muted;
+  el.volume.value = String(v);
+  el.mute.classList.toggle("muted", muted || v === 0);
+  // Three glyphs rather than two: silent, quiet, loud. The slider is short,
+  // so the icon is doing real work at a glance.
+  el.mute.textContent = muted || v === 0 ? "\u{1F507}" : v < 0.5 ? "\u{1F509}" : "\u{1F50A}";
+  el.mute.setAttribute("aria-label", muted || v === 0 ? "unmute" : "mute");
+  try {
+    localStorage.setItem(VOL_KEY, JSON.stringify({ v, muted }));
+  } catch { /* private window: the session keeps it, the next one will not */ }
+}
+
+function wireVolume(): void {
+  let v = 1;
+  let muted = false;
+  try {
+    const raw = localStorage.getItem(VOL_KEY);
+    if (raw) {
+      const p = JSON.parse(raw) as { v?: number; muted?: boolean };
+      if (typeof p.v === "number" && Number.isFinite(p.v)) v = Math.min(Math.max(p.v, 0), 1);
+      muted = p.muted === true;
+    }
+  } catch { /* unreadable or not ours -- fall back to full volume */ }
+  applyVolume(v, muted);
+
+  el.volume.addEventListener("input", () => {
+    // Dragging away from zero is itself an unmute; leaving it muted would
+    // make the slider look broken.
+    applyVolume(parseFloat(el.volume.value), false);
+  });
+  // The button is a toggle, and it has to remember what to come back to: an
+  // unmute that restored 0 would be indistinguishable from a broken button.
+  el.mute.addEventListener("click", () => {
+    const cur = parseFloat(el.volume.value);
+    if (el.audio.muted || cur === 0) applyVolume(cur > 0 ? cur : 1, false);
+    else applyVolume(cur, true);
+  });
+}
+
 function wireTransport(): void {
   el.play.addEventListener("click", toggleTransport);
+  wireVolume();
 
   el.scrubber.addEventListener("pointerdown", () => (scrubbing = true));
   const endScrub = () => {
@@ -371,7 +422,9 @@ function wireTransport(): void {
       return;
     }
     if (e.target instanceof HTMLInputElement) return;
-    if (e.code === "ArrowLeft") {
+    if (e.code === "KeyM") {
+      el.mute.click();
+    } else if (e.code === "ArrowLeft") {
       clock.seek(clock.time - 5);
     } else if (e.code === "ArrowRight") {
       clock.seek(clock.time + 5);

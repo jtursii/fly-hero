@@ -442,6 +442,23 @@ button.play:hover:not(:disabled) { box-shadow: 0 0 14px rgba(111, 211, 255, 0.3)
 #scrubber { width: 100%; accent-color: var(--accent); cursor: pointer; }
 #scrubber:disabled { opacity: 0.4; cursor: not-allowed; }
 
+/* Volume. Narrow on purpose: it shares the transport's first row with the
+   scrubber, and the scrubber is the one that has to stay grabbable. */
+.vol { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+#volume { width: 78px; accent-color: var(--accent); cursor: pointer; }
+.vol-btn {
+  width: 24px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.vol-btn:hover { color: var(--text); }
+.vol-btn.muted { color: #ff8c6b; }
+
 .readouts { display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 .transport .time { font-size: 11px; color: var(--text); white-space: nowrap; }
 .readouts .sync.bad { color: #ff8c6b; }
@@ -615,6 +632,8 @@ button.play:hover:not(:disabled) { box-shadow: 0 0 14px rgba(111, 211, 255, 0.3)
   .readouts { gap: 8px; font-size: 10px; white-space: normal; }
   /* A finger-sized scrubber; the thumb is the smallest target on the page. */
   #scrubber { height: 28px; }
+  #volume { height: 28px; width: 92px; }
+  .vol-btn { width: 30px; font-size: 14px; }
   button.play { width: 44px; height: 44px; font-size: 16px; }
   .tele-col { grid-template-rows: 280px 250px auto; }
   .aux-row { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px 200px; }
