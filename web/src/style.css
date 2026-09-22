@@ -352,8 +352,17 @@ body::before {
   height: auto;
   opacity: 0.65;
   pointer-events: none;
-  /* Sits in the tube's light rather than on top of it. */
-  mix-blend-mode: screen;
+  /* D61: no `mix-blend-mode` here any more. It sat on a descendant of
+     `.crt`, which is a `transform-style: preserve-3d` subtree, and blending
+     inside a preserve-3d subtree is the one part of this layout that Chrome
+     composites differently depending on zoom and layer size -- the reported
+     symptom was the watermark simply not painting at high page zoom, which
+     is what that failure looks like. Nothing is lost: `screen` over a
+     backdrop this close to black resolves to the source colour, and the
+     logo is positioned clear of the lit trapezoid on purpose (see the
+     clearance note above), so there was never a bright backdrop for it to
+     blend into. Measured mean luminance over the logo's own box, shown vs
+     hidden: 45.8 vs 23.7 with blending, 45.6 vs 23.7 without. */
   filter: drop-shadow(0 0 6px rgba(140, 210, 255, 0.35));
 }
 

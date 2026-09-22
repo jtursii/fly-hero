@@ -23,6 +23,8 @@
  *    - `elementFromPoint` at each control's centre is that control or a
  *      child of it -- nothing is painted over it;
  *    - the CRT does not overlap the transport or the stat strip;
+ *    - the CRT's fly watermark is actually *painted* -- measured in pixels,
+ *      shown vs hidden, because a bounding box proves nothing (D61);
  *    - pause survives repeated real mid-song clicks, and spacebar toggles;
  *    - the volume slider reaches the audio element, mute round-trips to the
  *      same level, and the level survives a reload.
@@ -162,6 +164,70 @@ for (const vp of VIEWPORTS) {
       `transport top ${overlap.transportTop.toFixed(1)})`);
   say(!overlap.stats, `CRT does not overlap the stat strip`);
   console.log(`  (CRT painted box ${overlap.crt.w.toFixed(0)}x${overlap.crt.h.toFixed(0)})`);
+
+  // --- the CRT watermark is actually painted -------------------------------
+  // Not "is it in the DOM with the right box" -- that was true the whole
+  // time the user was looking at an empty tube. A blend mode that the
+  // compositor drops, an asset that 404s and a zero-alpha image all leave a
+  // perfect bounding box behind, so the only honest test is pixels: shoot
+  // the logo's own box, hide it, shoot again, and compare brightness.
+  const logoBox = await page.evaluate(() => {
+    const r = document.querySelector(".crt-logo").getBoundingClientRect();
+    const s = document.querySelector(".crt-screen").getBoundingClientRect();
+    return {
+      clip: { x: r.left, y: r.top, width: r.width, height: r.height },
+      pctOfScreen: (100 * r.width) / s.width,
+      // Left edge of the highway's trapezoid at the logo's lowest point,
+      // from highway.ts's own projection: 39.0% of the screen's width at
+      // the horizon (y = 8%) falling to 3.4% at the bottom.
+      surfaceAtLogoBottom: (() => {
+        const yFrac = (r.bottom - s.top) / s.height;
+        const t = Math.min(Math.max((yFrac - 0.08) / 0.92, 0), 1);
+        return 100 * (0.39 + (0.034 - 0.39) * t);
+      })(),
+      rightPct: (100 * (r.right - s.left)) / s.width,
+    };
+  });
+
+  /** Mean luminance of a clip, decoded by the page itself (no image deps). */
+  const meanLuma = async (clip) => {
+    const buf = await page.screenshot({ clip });
+    return page.evaluate(async (b64) => {
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = rej;
+        img.src = "data:image/png;base64," + b64;
+      });
+      const cv = document.createElement("canvas");
+      cv.width = img.width;
+      cv.height = img.height;
+      const cx = cv.getContext("2d");
+      cx.drawImage(img, 0, 0);
+      const d = cx.getImageData(0, 0, cv.width, cv.height).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      return sum / (d.length / 4);
+    }, buf.toString("base64"));
+  };
+
+  const lumaShown = await meanLuma(logoBox.clip);
+  await page.evaluate(() => { document.querySelector(".crt-logo").style.visibility = "hidden"; });
+  await sleep(250);
+  const lumaHidden = await meanLuma(logoBox.clip);
+  await page.evaluate(() => { document.querySelector(".crt-logo").style.visibility = ""; });
+  await sleep(150);
+  // Measured delta is ~22 on a tube that sits around 24; 5 is far below any
+  // real rendering and far above screenshot noise.
+  say(lumaShown - lumaHidden > 5,
+      `the CRT watermark is painted, not just laid out ` +
+      `(mean luminance over its box ${lumaShown.toFixed(1)} shown vs ` +
+      `${lumaHidden.toFixed(1)} hidden)`);
+  say(logoBox.pctOfScreen >= 20 && logoBox.pctOfScreen <= 30,
+      `watermark is 20-30% of the screen's width (${logoBox.pctOfScreen.toFixed(1)}%)`);
+  say(logoBox.rightPct < logoBox.surfaceAtLogoBottom,
+      `watermark stays clear of the highway (ends at ${logoBox.rightPct.toFixed(1)}%, ` +
+      `surface starts at ${logoBox.surfaceAtLogoBottom.toFixed(1)}%)`);
 
   // --- pause, driven the way a person drives it ---------------------------
   // Real mouse clicks at the button's centre, never `clock.toggle()`: the
