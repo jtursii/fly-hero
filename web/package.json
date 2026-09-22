@@ -10,6 +10,7 @@
     "check:sync": "node scripts/check_sync.mjs",
     "check:brain": "node scripts/check_brain.mjs",
     "check:retina": "node scripts/check_retina.mjs",
+    "check:panels": "node scripts/check_panels.mjs",
     "shots": "node scripts/shots.mjs"
   },
   "dependencies": {

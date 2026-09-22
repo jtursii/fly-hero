@@ -65,15 +65,33 @@ def choose_retina_channels(photo_map, n_channels: int) -> np.ndarray:
 
 
 def scope_channels(meta: dict) -> list[str]:
-    """Oscilloscope channel names (D44): whole-brain and DN mean rate, mean
-    retina drive, then one mean-rate trace per super_class."""
-    return ["all", "dn", "retina_drive"] + [f"sc:{n}" for n in meta["super_class_names"]]
+    """Oscilloscope channel names (D44, extended by D53): whole-brain and DN
+    mean rate, mean retina drive, one mean-rate trace per super_class, then
+    the excitatory and inhibitory population means the site plots."""
+    return (["all", "dn", "retina_drive"]
+            + [f"sc:{n}" for n in meta["super_class_names"]] + ["exc", "inh"])
+
+
+def neuron_signs(graph: dict) -> np.ndarray:
+    """+1 excitatory / -1 inhibitory per neuron, 0 where it has no outgoing
+    edge. FlyWire's sign is a property of the presynaptic neuron's predicted
+    transmitter, so every edge leaving a neuron carries the same sign -- this
+    asserts that rather than assuming it, and reads it off the unfiltered
+    edge list because min_syn gates edges, never a neuron's transmitter."""
+    n = len(graph["type_id"])
+    total = np.zeros(n, dtype=np.int64)
+    count = np.zeros(n, dtype=np.int64)
+    np.add.at(total, graph["pre"], graph["sign"].astype(np.int64))
+    np.add.at(count, graph["pre"], 1)
+    if not np.all(np.abs(total) == count):
+        raise ValueError("a neuron's outgoing edges disagree in sign")
+    return np.sign(total).astype(np.int8)
 
 
 def record_song(
     policy, env: VecRhythmEnv, song: Song, cfg: dict, cfg_game: dict, device, dtype,
     super_class_id: np.ndarray, dn_idx: np.ndarray, activity_fps: int,
-    retina_idx: np.ndarray, log=print,
+    retina_idx: np.ndarray, neuron_sign: np.ndarray, log=print,
 ) -> dict:
     """One song, start to finish. Returns every array the exporter needs."""
     fps = cfg_game["fps"]
@@ -88,13 +106,16 @@ def record_song(
     # Pooled to activity_fps and 4-bit quantized as we go: the full 60 Hz
     # float population trace for a 6:30 song would be 139,241 x 23,376 x 4 B.
     activity = np.zeros((n_activity, n_nodes), dtype=np.uint8)
-    scope = np.zeros((song_frames, 3 + int(super_class_id.max()) + 1), dtype=np.float32)
+    n_sc = int(super_class_id.max()) + 1
+    scope = np.zeros((song_frames, 3 + n_sc + 2), dtype=np.float32)  # +2: exc, inh
     # Retina is stored at activity_fps on the displayed channels only: the
     # full 60 Hz x 11,118 stream is ~1 GB/song and the site shows a subsample.
     retina = np.zeros((n_activity, len(retina_idx)), dtype=np.float32)
     logits_all = np.zeros((song_frames, 6), dtype=np.float32)
 
-    sc_masks = [torch.from_numpy(super_class_id == c).to(device) for c in range(int(super_class_id.max()) + 1)]
+    sc_masks = [torch.from_numpy(super_class_id == c).to(device) for c in range(n_sc)]
+    exc_t = torch.from_numpy(neuron_sign > 0).to(device)
+    inh_t = torch.from_numpy(neuron_sign < 0).to(device)
     dn_t = torch.from_numpy(dn_idx).to(device)
     retina_t = torch.from_numpy(retina_idx).to(device)
 
@@ -120,6 +141,8 @@ def record_song(
             scope[f, 2] = float(i_photo[0].abs().mean())
             for c, mask in enumerate(sc_masks):
                 scope[f, 3 + c] = float(r[mask].mean())
+            scope[f, 3 + n_sc] = float(r[exc_t].mean())
+            scope[f, 4 + n_sc] = float(r[inh_t].mean())
             pool_buf[f % activity_step] = r.float().cpu().numpy()
             retina_buf[f % activity_step] = i_photo[0, retina_t].float().cpu().numpy()
             if f % activity_step == activity_step - 1 or f == song_frames - 1:
@@ -185,6 +208,7 @@ def main() -> None:
     split_of = {sid: name for name, ids in splits.items() for sid in ids}
     super_class_id = graph_np["super_class_id"].astype(np.int64)
     dn_idx = graph_np["dn_idx"].astype(np.int64)
+    neuron_sign = neuron_signs(graph_np)
     retina_idx = choose_retina_channels(photo_map, cfg["retina_channels"])
     retina_display_pos = photo_map.image_pos[retina_idx]  # [C, 2] in frame pixels
 
@@ -198,7 +222,7 @@ def main() -> None:
         print(f"  {song.artist} - {song.title} [{difficulty}, {split}, {song.duration_s:.0f}s]", flush=True)
         rec = record_song(
             policy, env, song, cfg, cfg_game, device, dtype, super_class_id, dn_idx,
-            cfg["activity_fps"], retina_idx,
+            cfg["activity_fps"], retina_idx, neuron_sign,
         )
         np.savez(
             run_dir / f"{sid}.npz", activity=rec["activity"], retina=rec["retina"],

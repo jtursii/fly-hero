@@ -13,6 +13,8 @@ import {
 import { Highway } from "./highway.ts";
 import { BrainView } from "./brain.ts";
 import { RetinaEncoder, RetinaView } from "./retina.ts";
+import { DecisionView } from "./decision.ts";
+import { ScopeView } from "./scope.ts";
 import type { BrainAssets, GameEvent, Manifest, SongLight } from "./types.ts";
 
 const RATES: Rate[] = [0.25, 1, 2];
@@ -28,6 +30,11 @@ const el = {
   credit: $("credit"),
   brainCanvas: $<HTMLCanvasElement>("brain-canvas"),
   eyesCanvas: $<HTMLCanvasElement>("eyes-canvas"),
+  dnCanvas: $<HTMLCanvasElement>("dn-canvas"),
+  scopeCanvas: $<HTMLCanvasElement>("scope-canvas"),
+  aboutOpen: $<HTMLButtonElement>("about-open"),
+  aboutClose: $<HTMLButtonElement>("about-close"),
+  about: $("about"),
   bActive: $("b-active"),
   bActiveK: $("b-active-k"),
   bMean: $("b-mean"),
@@ -53,6 +60,8 @@ const clock = new MasterClock();
 const highway = new Highway(el.highway);
 let brainView: BrainView | null = null;
 let retinaView: RetinaView | null = null;
+const decisionView = new DecisionView(el.dnCanvas);
+const scopeView = new ScopeView(el.scopeCanvas);
 let assets: BrainAssets | null = null;
 let song: SongLight | null = null;
 let currentId: string | null = null;
@@ -98,6 +107,8 @@ async function selectSong(id: string): Promise<void> {
   highway.clearSong();
   brainView?.setSong(null, null);
   retinaView?.setSong(null);
+  decisionView.setSong(null);
+  scopeView.setSong(null);
   song = null;
   syncSongButtons(true);
 
@@ -127,6 +138,9 @@ async function selectSong(id: string): Promise<void> {
     // The retina is derived from the manifest's notes, so the panel is live
     // as soon as the light files land -- it never waits on the recording.
     retinaView?.setSong(manifest);
+    // probs.bin and actions.bin are light files, so the decision panel is
+    // live with the transport; only the oscilloscope waits on the recording.
+    decisionView.setSong(manifest, light.probs, actions);
     el.crtTitle.textContent =
       `${manifest.artist} — ${manifest.title} · ${manifest.difficulty}`.toUpperCase();
     el.sHit.textContent = (manifest.hit_rate * 100).toFixed(1) + "%";
@@ -151,6 +165,7 @@ async function selectSong(id: string): Promise<void> {
       if (currentId !== id) return; // the user moved on while it downloaded
       const scopeAll = Math.max(0, assets.brain.scope_channels.indexOf("all"));
       brainView.setSong(heavy, song.manifest, scopeAll);
+      scopeView.setSong(song.manifest, heavy.scope, assets.brain.scope_channels);
     } catch (err) {
       console.error(err);
       el.bActive.textContent = "—";
@@ -203,6 +218,8 @@ function frame(nowMs: number): void {
   highway.draw(t);
   brainView?.render(t);
   retinaView?.render(t);
+  decisionView.draw(t);
+  scopeView.draw(t);
 
   syncPlayButton();
   el.led.classList.toggle("on", clock.isPlaying);
@@ -260,8 +277,23 @@ function wireTransport(): void {
 
   el.audio.addEventListener("loadedmetadata", () => clock.noteAudioDuration(el.audio.duration));
 
+  const setAbout = (open: boolean) => {
+    el.about.hidden = !open;
+    // A modal over a playing replay is a reading surface, not a pause.
+    el.aboutOpen.setAttribute("aria-expanded", String(open));
+  };
+  el.aboutOpen.addEventListener("click", () => setAbout(true));
+  el.aboutClose.addEventListener("click", () => setAbout(false));
+  el.about.addEventListener("click", (e) => {
+    if (e.target === el.about) setAbout(false); // click-away on the backdrop
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement) return;
+    if (e.code === "Escape") {
+      setAbout(false);
+      return;
+    }
     if (e.code === "Space") {
       e.preventDefault();
       if (!el.play.disabled) toggleTransport();
@@ -276,6 +308,8 @@ function wireTransport(): void {
     highway.resize();
     brainView?.resize();
     retinaView?.resize();
+    decisionView.resize();
+    scopeView.resize();
   };
   window.addEventListener("resize", onResize);
   // The CRT and the brain canvas are both sized by the grid, so watch the
@@ -284,6 +318,8 @@ function wireTransport(): void {
   ro.observe(el.highway.parentElement!);
   ro.observe(el.brainCanvas.parentElement!);
   ro.observe(el.eyesCanvas.parentElement!);
+  ro.observe(el.dnCanvas.parentElement!);
+  ro.observe(el.scopeCanvas.parentElement!);
 }
 
 async function boot(): Promise<void> {
@@ -332,6 +368,8 @@ declare global {
       getBrain: () => BrainView | null;
       getRetina: () => RetinaView | null;
       makeRetinaEncoder: (pos: [number, number][]) => RetinaEncoder;
+      getDecision: () => DecisionView;
+      getScope: () => ScopeView;
       getSong: () => SongLight | null;
       getAssets: () => BrainAssets | null;
     };
@@ -346,6 +384,8 @@ window.flyhero = {
   // scripts/check_retina.mjs builds its own encoder with this and compares
   // it against retina.bin; the panel's own encoder is left alone.
   makeRetinaEncoder: (pos: [number, number][]) => new RetinaEncoder(pos),
+  getDecision: () => decisionView,
+  getScope: () => scopeView,
   getSong: () => song,
   getAssets: () => assets,
 };

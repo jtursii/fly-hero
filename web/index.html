@@ -15,6 +15,7 @@
           connectome, playing charts it learned on &mdash; recorded replay, nothing trains here.
         </div>
         <div class="credit" id="credit">FlyWire FAFB v783</div>
+        <button class="about-btn" id="about-open">About</button>
       </header>
 
       <main class="grid">
@@ -106,20 +107,123 @@
 
           <div class="aux-row">
             <section class="panel dn-panel" id="dn-panel">
-              <h2 class="panel-title">Descending neurons <span class="meta">&middot; decision</span></h2>
-              <div class="placeholder-body">
-                <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 6 readout probabilities from <code>probs.bin</code></div>
-              </div>
+              <h2 class="panel-title">Descending neurons</h2>
+              <span class="panel-note">tick = 0.50</span>
+              <canvas id="dn-canvas"></canvas>
+              <div class="panel-foot">lit = fired &middot; strum needs a peak, not just the tick</div>
             </section>
             <section class="panel scope-panel" id="scope-panel">
               <h2 class="panel-title">Rate oscilloscope</h2>
-              <div class="placeholder-body">
-                <div class="placeholder-tag">PLACEHOLDER &middot; Session 4 &mdash; 20 s ring buffer from <code>scope.bin</code></div>
+              <span class="panel-note">20 s to the playhead</span>
+              <canvas id="scope-canvas"></canvas>
+              <div class="panel-foot">
+                <span class="k"><i class="dot exc"></i>excitatory (83,793)</span>
+                <span class="k"><i class="dot inh"></i>inhibitory (45,550)</span>
               </div>
             </section>
           </div>
         </section>
       </main>
+    </div>
+
+
+    <div class="modal-backdrop" id="about" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <button class="modal-close" id="about-close" aria-label="close">&times;</button>
+        <h2 id="about-title">About Fly Hero</h2>
+
+        <h3>What this is</h3>
+        <p>
+          A model of a fruit fly's brain, playing a Clone Hero&ndash;style chart. The wiring is
+          real: all 139,241 neurons of the adult <i>Drosophila</i> brain and the 2,700,429
+          connections between them, taken from the FlyWire v783 connectome and never altered.
+          Each neuron is simulated as a <b>rate</b> &mdash; roughly, how hard it is driving its
+          targets &mdash; not as individual spikes. The only things training changed are each
+          cell type's time constant and bias, one gain per type-pair, and the linear readout
+          that turns descending-neuron activity into button presses.
+        </p>
+        <p>
+          <b>Everything here is a recording.</b> The fly played these songs once; the site
+          replays what happened, frame by frame. Nothing trains, learns or decides while you
+          watch, and scrubbing moves every panel to the same instant of the same take.
+        </p>
+
+        <h3>What you are looking at</h3>
+        <ul>
+          <li>
+            <b>Through the fly's eyes</b> is the fly's actual input &mdash; the contrast
+            arriving at 11,118 photoreceptors, which is all the brain ever receives. The
+            note chart, the lane colors and the note timings are <i>not</i> fed in anywhere
+            else. <b>The CRT is for you, not for the fly.</b>
+          </li>
+          <li>
+            <b>Connectome</b> shows the recorded neurons flashing at their own activity, over
+            the whole brain drawn at real soma positions. 4,096 of the 139,241 were recorded
+            individually (every descending neuron, a photoreceptor sample, and the most
+            variable of the rest); the active count is out of those 4,096, and the mean
+            activation is over all 139,241.
+          </li>
+          <li>
+            <b>Descending neurons</b> are the six numbers the brain actually outputs. The tick
+            is the decoder's 0.50 threshold; a bar lights when that output really fired, read
+            from the same recording the CRT's fret lights come from. Strum is deliberately not
+            just "past the tick": it fires on a peak above it, so a high strum bar with no
+            strum is the decoder waiting for the maximum.
+          </li>
+          <li>
+            <b>Rate oscilloscope</b> is the mean rate of every excitatory neuron (83,793) and
+            every inhibitory one (45,550), over the 20 seconds up to the playhead.
+          </li>
+          <li>
+            <b>The fly, the stool and the controller are an illustration.</b> Only the
+            connectome, eyes, decision and oscilloscope panels are recorded data.
+          </li>
+        </ul>
+
+        <h3>How well it actually plays</h3>
+        <p>
+          On Medium charts from songs it <b>never trained on</b>, it hits
+          <b>0.699</b> of notes (mean over 29 held-out songs, standard error 0.019) and
+          overstrums about <b>40 times a minute</b>. We set 0.70 as the bar before running it,
+          so that is a narrow miss, reported as it came out.
+        </p>
+        <p>
+          <b>All three songs on this site are songs it practiced.</b> They were picked to be
+          watchable, and they flatter it: 0.89, 0.88 and 0.91. The honest number for a song it
+          has never seen is the 0.699 above.
+        </p>
+
+        <h3>Limitations</h3>
+        <ul>
+          <li>A <b>rate model</b>, not a spiking one: no action potentials, no dendrites, no
+            synaptic delays beyond a single time constant per cell type.</li>
+          <li>No neuromodulation and no gap junctions. Every connection is chemical, and its
+            sign is FlyWire's <i>predicted</i> transmitter &mdash; 23,387 neurons fall back to
+            a cell-type consensus and 919 to a default, so the excitatory/inhibitory split on
+            the oscilloscope is a prediction, not a measurement.</li>
+          <li>The <b>readout is learned</b>, not anatomical. Real flies have no wiring from
+            descending neurons to a guitar controller; that map is fitted.</li>
+          <li>A <b>simulated game</b>, not Clone Hero itself: our own renderer and our own
+            scoring, hammer-ons/pull-offs and taps treated as ordinary strums, open notes
+            removed.</li>
+          <li>21,141 of the 139,241 neurons (15%) are drawn at an anchor point rather than a
+            true soma, and are dimmed to show it.</li>
+          <li>It was trained by copying a scripted expert player, not by discovering how to
+            play on its own.</li>
+        </ul>
+
+        <h3>Credits</h3>
+        <p>
+          Connectome: <b>FlyWire FAFB v783</b> &mdash; Dorkenwald et al. 2024, <i>Nature</i>
+          (whole-brain connectome) and Schlegel et al. 2024, <i>Nature</i> (cell-type
+          annotations), used under <b>CC BY 4.0</b>. Connection counts here are edges at
+          &ge;5 synapses, aggregated per neuron pair, not raw synapse counts.
+        </p>
+        <p class="fineprint">
+          Charts by their respective charters, played locally and not redistributed. Not
+          affiliated with, endorsed by, or connected to Clone Hero or Guitar Hero.
+        </p>
+      </div>
     </div>
 
     <audio id="audio" preload="auto"></audio>

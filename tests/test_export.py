@@ -17,7 +17,9 @@ import pytest
 import torch
 
 from export.export_web import choose_slots, flow_edges, normalize_positions, notes_json, pack_4bit
-from export.record import choose_retina_channels, quantize_4bit, scope_channels
+from export.record import (
+    choose_retina_channels, neuron_signs, quantize_4bit, scope_channels,
+)
 from export.validate_export import notes_from_manifest, unpack_actions
 from flyhero.game.retina import build_photoreceptor_map
 from flyhero.game.sim import VecRhythmEnv
@@ -124,7 +126,37 @@ def test_flow_edges_are_real_edges_from_recorded_neurons():
 
 def test_scope_channels_are_named_for_every_super_class():
     names = scope_channels({"super_class_names": ["central", "optic"]})
-    assert names == ["all", "dn", "retina_drive", "sc:central", "sc:optic"]
+    assert names == ["all", "dn", "retina_drive", "sc:central", "sc:optic", "exc", "inh"]
+
+
+def test_neuron_signs_are_per_neuron_and_zero_without_out_edges():
+    # Neuron 0 is excitatory (two out-edges), 1 inhibitory, 2 has none.
+    graph = {
+        "type_id": np.zeros(3, dtype=np.int64),
+        "pre": np.array([0, 0, 1], dtype=np.int64),
+        "sign": np.array([1, 1, -1], dtype=np.int64),
+    }
+    assert neuron_signs(graph).tolist() == [1, -1, 0]
+
+
+def test_neuron_signs_rejects_a_neuron_whose_out_edges_disagree():
+    graph = {
+        "type_id": np.zeros(2, dtype=np.int64),
+        "pre": np.array([0, 0], dtype=np.int64),
+        "sign": np.array([1, -1], dtype=np.int64),
+    }
+    with pytest.raises(ValueError, match="disagree in sign"):
+        neuron_signs(graph)
+
+
+@pytest.mark.skipif(not REAL_DATA, reason="requires real processed data")
+def test_real_connectome_signs_are_consistent_per_neuron():
+    # The exc/inh oscilloscope traces are only meaningful if FlyWire's sign
+    # really is a neuron property; this is the whole-graph check of that.
+    graph = dict(np.load("data/processed/graph.npz"))
+    signs = neuron_signs(graph)
+    assert int((signs > 0).sum()) + int((signs < 0).sum()) == int((signs != 0).sum())
+    assert (signs > 0).sum() > 0 and (signs < 0).sum() > 0
 
 
 @pytest.mark.skipif(not REAL_DATA, reason="requires real processed data")
