@@ -124,14 +124,23 @@ body::before {
 /* --- stage -------------------------------------------------------------- */
 
 /* D57: the 3D fly is cut and the stage panel with it. The CRT is the hero of
-   the page and takes the whole left column, sized by height so it stays
-   fully visible, centred when the column is wider than its aspect ratio.
-   `perspective` here is what gives the tilt below its depth. */
+   the page and takes the whole left column, aspect-fitted to whatever space
+   is left over and centred in it. `perspective` here is what gives the tilt
+   below its depth.
+
+   D58: `container-type: size` is load-bearing, not decoration. The CRT is
+   sized in `cqh`/`cqw` off this box (see `.crt`), and size containment is
+   also what stops the CRT's own contents from sizing it: the highway canvas
+   carries an intrinsic width (its backing store, set from its client width),
+   which reached `.crt`'s `min-width: auto` as a grid item, transferred
+   through `aspect-ratio` into a minimum *height*, and grew the tube past its
+   track -- over the transport -- one resize at a time. */
 .stage-body {
   display: grid;
   place-items: center;
   min-height: 0;
   min-width: 0;
+  container-type: size;
   perspective: 2200px;
   perspective-origin: 50% 42%;
 }
@@ -139,6 +148,25 @@ body::before {
 /* --- fly's-eye panel --------------------------------------------------- */
 
 #eyes-canvas { position: absolute; inset: 28px 10px 40px; display: block; width: calc(100% - 20px); height: calc(100% - 68px); }
+
+/* D58: the panel title and its note are both absolutely positioned on one
+   line, flush left and flush right, so a narrow panel runs them together --
+   measured 83 px of overlap at 1440 and 51 px at 1512, clear at 1728 and
+   1920 ("11,118 photoreceptors" printed through "512 shown"). This is the
+   treatment the phone layout already gives them, keyed to the panel's own
+   width rather than the window's, because the panel's width is what the
+   collision actually depends on. Only the fly's-eye panel has a title long
+   enough to collide; the rule is scoped to it rather than applied to every
+   panel, which would push three other canvases down for nothing.
+
+   Deliberately above the media queries below: at phone widths this query
+   matches too, and the `@media` rules have equal specificity, so source
+   order is what lets the phone layout keep its taller caption inset. */
+.eyes-panel { container-type: inline-size; }
+@container (max-width: 720px) {
+  .eyes-panel .panel-note { top: 26px; left: 12px; right: 12px; text-align: left; }
+  #eyes-canvas { inset: 44px 10px 40px; height: calc(100% - 84px); }
+}
 
 .eyes-caption {
   position: absolute;
@@ -186,12 +214,30 @@ body::before {
 /* --- CRT --------------------------------------------------------------- */
 
 .crt {
-  /* Fills the stage: height-led so the whole tube is always on screen, with
-     `max-width` taking over on short, wide viewports. */
-  height: 100%;
+  /* D58: a real aspect-fit -- the smaller of "as tall as the stage" and "as
+     tall as the stage's width allows at this ratio". `height: 100%` with
+     `max-width: 100%` was not one: when the width clamped, the height did
+     not follow, so the ratio broke and the tube overflowed downward.
+     `min-*: 0` drops the grid item's automatic minimum, which is the other
+     half of the overflow described on `.stage-body`.
+
+     `--crt-fit-inset` is not a margin: a 3D-transformed element paints
+     outside its layout box (D57 measured 805x697 painted for 803x690 laid
+     out), and that painted overhang is what a click hit-tests against. This
+     keeps the overhang inside the stage instead of over the transport. */
+  --crt-fit-inset: 16px;
+  height: min(
+    100cqh - var(--crt-fit-inset),
+    (100cqw - var(--crt-fit-inset)) * 3.5 / 4
+  );
   width: auto;
-  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
   aspect-ratio: 4 / 3.5;
+  /* Nothing in the tube is interactive -- it is a picture of a recording.
+     Saying so means a tilted, glowing, overhanging box can never swallow a
+     click meant for the controls, whatever the layout does later. */
+  pointer-events: none;
   display: flex;
   flex-direction: column;
   padding: 18px 18px 0;
@@ -234,7 +280,12 @@ body::before {
   position: absolute;
   top: 4.2%;
   left: 3.4%;
-  width: 10%;          /* the 8-12% the brief asks for; scales with the CRT */
+  /* D58: 2.5x D57's 10%. Still clear of the highway: the trapezoid's left
+     edge runs from 39.0% of the screen's width at the horizon (y = 8%) to
+     3.4% at the bottom, so at the logo's lowest point (y = 26.9%, from the
+     asset's 774x604) the surface starts at 31.7% and the logo ends at
+     28.4%. The gap is the reason this is 25% and not more. */
+  width: 25%;
   height: auto;
   opacity: 0.65;
   pointer-events: none;
@@ -529,7 +580,12 @@ button.play:hover:not(:disabled) { box-shadow: 0 0 14px rgba(111, 211, 255, 0.3)
   .grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
   .stage-col { grid-template-rows: auto auto auto; }
   .tele-col { grid-template-rows: 320px 260px 220px; }
-  .stage-body { perspective: 1700px; }
+  /* `container-type: size` must go here, or it would be the mobile bug all
+     over again with the sign flipped: this row is `auto` in the stacked
+     layout, and size containment makes an auto-height box resolve as if it
+     had no contents -- i.e. to zero, collapsing the CRT. Width-led sizing
+     needs no container query anyway. */
+  .stage-body { container-type: normal; perspective: 1700px; }
   .crt { height: auto; width: 100%; aspect-ratio: 4 / 3.3; }
   .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 0; }
   /* `height: auto` matters as much as `overflow: auto`: the base rule pins

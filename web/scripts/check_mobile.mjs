@@ -4,8 +4,12 @@
  *    - the CRT is above every telemetry panel, and the panels are stacked in
  *      one column (no side-by-side pair squeezed into a phone's width);
  *    - nothing overflows horizontally, at any scroll position;
- *    - the fly-logo watermark is still 8-12% of the screen's width, i.e. it
- *      scaled with the CRT rather than being pinned to a pixel size;
+ *    - the fly-logo watermark is still a fixed share of the screen's width,
+ *      i.e. it scaled with the CRT rather than being pinned to a pixel size.
+ *      The band is 20-30%: D58 enlarged the logo 2.5x from D57's 8-12% at
+ *      the user's request, so the band moved with the spec. What this line
+ *      tests -- that the watermark is sized off the CRT and not in pixels --
+ *      is unchanged;
  *    - a tap on the transport toggles it, and a touch drag on the scrubber
  *      seeks -- both through real touch events, not synthetic clicks;
  *    - a one-finger drag on the connectome panel rotates the brain;
@@ -124,8 +128,8 @@ for (const vp of VIEWPORTS) {
   say(layout.collisions.length === 0,
       `no panel title runs into its note (${layout.collisions.length ? layout.collisions.join(", ") : "none"})`);
 
-  say(layout.logoPctOfScreen >= 8 && layout.logoPctOfScreen <= 12,
-      `logo scales with the CRT (${layout.logoPctOfScreen.toFixed(1)}% of screen width, brief says 8-12%)`);
+  say(layout.logoPctOfScreen >= 20 && layout.logoPctOfScreen <= 30,
+      `logo scales with the CRT (${layout.logoPctOfScreen.toFixed(1)}% of screen width, D58 says 20-30%)`);
 
   say(layout.quality === "reduced" || layout.quality === "minimal",
       `mobile render tier active (quality "${layout.quality}")`);

@@ -351,15 +351,27 @@ function wireTransport(): void {
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement) return;
     if (e.code === "Escape") {
       setAbout(false);
       return;
     }
     if (e.code === "Space") {
+      // Space toggles from anywhere, including the scrubber -- which is
+      // where focus lands after a scrub, and which was the one place the
+      // old handler bailed out of (`e.target instanceof HTMLInputElement`),
+      // so the shortcut stopped working exactly after you used the
+      // transport. A range input does nothing with Space natively.
+      //
+      // `preventDefault` is doing two jobs: no page scroll, and no second
+      // toggle. Space on a focused <button> is a click, and the button that
+      // was just pressed still has focus -- so without this, one press ran
+      // the shortcut and the button's own handler, and the two cancelled.
       e.preventDefault();
       if (!el.play.disabled) toggleTransport();
-    } else if (e.code === "ArrowLeft") {
+      return;
+    }
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.code === "ArrowLeft") {
       clock.seek(clock.time - 5);
     } else if (e.code === "ArrowRight") {
       clock.seek(clock.time + 5);

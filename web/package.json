@@ -12,7 +12,8 @@
     "check:retina": "node scripts/check_retina.mjs",
     "check:panels": "node scripts/check_panels.mjs",
     "shots": "node scripts/shots.mjs",
-    "check:mobile": "node scripts/check_mobile.mjs"
+    "check:mobile": "node scripts/check_mobile.mjs",
+    "check:layout": "node scripts/check_layout.mjs"
   },
   "dependencies": {
     "three": "^0.169.0"
