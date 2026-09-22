@@ -1,106 +1,186 @@
 # Fly Brain Hero
 
-A rate-based model of the adult fruit fly brain, wired from the FlyWire v783 connectome, learns to play Clone Hero–style rhythm-game charts in a headless simulator, seeing the game only through a biologically-oriented retina encoder built from real photoreceptor anatomy. Training data is the user's own local Clone Hero song library. The end goal is a three.js site replaying a handful of showcase songs with the brain's activity visualized in 3D next to the note highway.
+**A real fruit fly brain — all 139,241 neurons of it — learns to play Clone Hero.**
 
-## Status
+The connectome (every neuron and every one of the 2.7M connections between them) comes straight from [FlyWire](https://flywire.ai/)'s FAFB v783 reconstruction of an adult *Drosophila melanogaster* brain, completely unaltered. The only things that ever get trained are each cell type's time constant and bias, one gain per connected type-pair, and a linear readout from descending-neuron activity to the five fret buttons and strum. The brain never sees the chart, the lanes, or the note timings — only contrast hitting a simulated retina, exactly the way a real fly would see a screen.
 
-Phases 0–2 are done. See [`docs/PROGRESS.md`](docs/PROGRESS.md) for full gate numbers, deviations, and repro commands; locked design decisions are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+It was trained on my own local Clone Hero library, in a headless rhythm-game simulator I built from scratch, and three of its best runs are replayed on a live site with the brain's own activity rendered in 3D next to the note highway.
 
-| Phase | Gate | One-line result |
+**[→ Watch it play](https://fly-hero-delta.vercel.app)**
+
+<p align="center">
+  <img src="docs/screenshots/hero-desktop.png" alt="Fly Hero desktop UI: a CRT-styled note highway on the left, mid-song, with the connectome, the fly's own eye view, descending-neuron bars, and a rate oscilloscope on the right." width="100%">
+</p>
+
+---
+
+## What am I looking at
+
+Every panel on the site is a **recording**, not a live simulation — the fly played each song once, offline, on my own machine, and the site scrubs through exactly what happened, frame by frame. Nothing trains, learns, or decides while you watch.
+
+| | |
+|---|---|
+| <img src="docs/screenshots/connectome-eyes.png" width="480"> | **Connectome** — all 139,241 neurons at their real anatomical soma positions, 4,096 of them recorded individually and shown flashing at their own activity. **Through the fly's eyes** — the fly's actual input: contrast arriving at 11,118 photoreceptors, one dot per cell. This is the *only* thing that ever reaches the brain — no chart data, no lane colors, no note timings, anywhere else. |
+| <img src="docs/screenshots/decision-scope.png" width="480"> | **Descending neurons** — the six numbers the brain's readout actually outputs (five frets + strum), with the decoder's threshold marked. **Rate oscilloscope** — mean firing rate of every excitatory (83,793) and every inhibitory (45,550) neuron in the brain, scrolling live. |
+
+<details>
+<summary><b>The CRT and the About panel</b> (click to expand)</summary>
+<br>
+
+The note highway itself — the CRT, the lane colors, the perspective, the scanlines — is a presentation built for *you*, not for the fly. What's actually recorded is which frets were held each frame and whether a note was hit, missed, or overstrummed; that's what drives the lit frets and the flashes.
+
+<img src="docs/screenshots/crt-closeup.png" width="440"> <img src="docs/screenshots/about-modal.png" width="440">
+
+The site also ships an About panel that states its own honest numbers up front — including the one gate this project narrowly missed. See [Results](#results) below for the same numbers.
+
+</details>
+
+<details>
+<summary><b>Mobile</b> (click to expand)</summary>
+<br>
+<img src="docs/screenshots/mobile.png" width="320">
+</details>
+
+---
+
+## How it works
+
+```
+Clone Hero chart (.chart / .mid)
+        │
+        ▼
+ headless rhythm-game simulator ──► scripted "perfect" expert player (behavior-cloning target)
+        │
+        ▼
+ biologically-grounded retina encoder            ← the ONLY input the brain ever receives
+   (11,118 photoreceptors, real optic anatomy)
+        │
+        ▼
+ connectome-constrained rate model                ← topology, synapse counts, edge signs: FIXED
+   139,241 neurons · 2.7M synaptic connections        trainable: per-type τ & bias, per-type-pair gain
+        │
+        ▼
+ linear readout (weights + bias)                  ← the ONLY thing that produces an action
+   descending-neuron activity → 5 frets + strum
+        │
+        ▼
+ replayed showcase runs ──► exported to a three.js + Tone.js site on Vercel
+```
+
+**The constraint that makes this interesting:** the wiring is never touched. Connectome topology, synapse counts, and edge signs (excitatory/inhibitory, from FlyWire's predicted neurotransmitter) are fixed throughout training — nothing is added, pruned, or rewired. What the model actually learns is how hard each of the ~9,000 cell types drives and responds (`tau`, `bias`), how strongly each connected pair of types influences each other (`gain`, via softplus so it's always positive), and how to read five buttons' worth of decision out of descending-neuron traffic. It's the fly's own brain, tuned, not a neural network shaped like a brain.
+
+**Training** is behavior cloning against a scripted, deterministic "perfect" player (`hit_rate = 1.000` on held-out Expert charts) that reads the chart directly — the brain never sees that data, only the retina's contrast. Songs are split by song (not by difficulty) into train/val/test, so a song's Easy and Medium charts never straddle a split. A watchdog (`train/watchdog.py`) catches and rolls back the rare gradient blow-up mid-run, halving the learning rate and restoring the last healthy checkpoint — this ran unattended overnight for most of its ~16 hours of total training.
+
+**Two controls run the identical training code path, config, and budget as the real model:**
+- a conventional CNN + GRU baseline that sees the *rendered frame* instead of the retina, to check the game itself is learnable;
+- a readout-only control (the connectome frozen, only the linear readout trained), which — as expected — never progresses past the easiest curriculum stage, showing the connectome's own dynamics are doing real work, not just providing a random-projection feature space.
+
+<details>
+<summary><b>More detail: the simulator, the retina, and the rules</b></summary>
+<br>
+
+- **Simulator** (`flyhero/game/`) is a from-scratch Clone Hero–style engine — `.chart`/`.mid` parsing, note/sustain/overstrum scoring, and a Gymnasium-style env — with exactly **one** implementation of the scoring rules (`rules.py`), shared by training, evaluation, and the showcase export, so nothing can silently diverge between what's trained and what's shown.
+- **Retina** (`flyhero/game/retina.py`, `retina_torch.py`) projects the rendered game frame onto each of the 11,118 photoreceptors' real retinotopic position, calibrated against the connectome's own optic-lobe columnar anatomy (matched-pair validation: neighboring photoreceptors that anatomically share input differ in projected position by a median of 1.6 lattice spacings, vs. 22.6 for random pairs).
+- **Brain** (`flyhero/brain/rate_model.py`) is a rate-coded (not spiking) simulation: each neuron's state is a continuous firing rate integrated over discrete per-cell-type time constants, not individual action potentials.
+
+</details>
+
+---
+
+## Results
+
+| Gate | What it measures | Result |
 |---|---|---|
-| 0 — Library inventory | G0 | 652 song folders found (≥100 required); no `.sng` packages, no fallback needed. |
-| 1 — Connectome graph | G1 | 139,241 proofread neurons, 2.7M edges, 11,118-neuron photoreceptor input layer, 1,303 descending neurons. |
-| 2 — Song ingest + game sim | G2 | 568 songs cached (453/55/60 train/val/test); scripted-perfect-player `hit_rate` 1.000 on 25 Expert songs (20 random + the 5 densest); env throughput 6.8× real-time at batch 64 (≥5×, amended from ≥10×, D21); retina retinotopy validated (matched-pair 1.63 / null-baseline 22.64 / superposition 1.437, all against required thresholds). |
+| **G1** — connectome graph | Nodes / edges / DNs / photoreceptors built from FlyWire v783 | **139,241 neurons**, **2,700,429 edges** (≥5 synapses), **1,303 descending neurons**, **11,118 photoreceptors** |
+| **G2** — simulator | Scripted-expert `hit_rate` on real Expert charts; env throughput | **1.000** hit rate, 0 misses/overstrums on 25 Expert charts; **6.8×** real-time simulation throughput |
+| **G3** — brain stability | Full retina→brain→readout pipeline: runtime, memory, activity regime | **0.85 s** fwd+bwd/batch on Apple Silicon MPS, **24.3 GiB** peak; 24.7% of non-photoreceptor neurons active in a healthy dynamic range |
+| **G4** — held-out skill | Mean hit rate on **Medium charts from songs never trained on** (29 held-out test songs) | **0.699** ± 0.019 SE — a narrow miss of the 0.70 bar set before training, reported as-is |
+| **G6** — export fidelity | Re-scoring the exported showcase recordings against the same rules used in training | **Exact match**, zero difference, on all 3 showcase songs |
 
-Currently starting Phase 3 (brain model + sanity baseline).
+The three showcase songs on the live site are ones the fly *practiced on* — picked because they're watchable, and they flatter it (0.88–0.91 hit rate). **The honest, apples-to-apples number for a song it's never seen is 0.699**, and the site's own About panel says so, unprompted, right next to the pretty numbers. I'd rather ship an accurate self-assessment than a cherry-picked one.
 
-## Setup
+Full gate-by-gate numbers, every deviation, and every fallback decision are logged in [`docs/PROGRESS.md`](docs/PROGRESS.md); every locked design decision (down to *why* a bias default had to move to make any neuron fire at all) is in [`docs/DECISIONS.md`](docs/DECISIONS.md) — 62 decisions and counting, kept as a real paper trail rather than tidied up after the fact.
 
-**Prerequisites:** [`uv`](https://docs.astral.sh/uv/), Python 3.12, `ffmpeg` (for debug video rendering), Node.js (for the `web/` site, later phases).
+---
 
-```bash
-uv sync
-```
+## Try it
 
-You'll need your own local Clone Hero song library (this repo never ships song charts or audio — see [Data and credits](#data-and-credits)). Create `configs/paths.yaml` (gitignored) pointing at it:
+**[fly-hero-delta.vercel.app](https://fly-hero-delta.vercel.app)** — no login, no build step, just open it. Scrub the timeline, switch songs, watch the fly's actual eyes next to the CRT built for you.
 
-```yaml
-song_library: "/path/to/your/Clone Hero/songs"
-```
+---
 
-Then, in order:
+## Tech stack
 
-```bash
-# Connectome: download FlyWire v783 data and build the trainable graph
-uv run python -m flyhero.connectome.download --config configs/connectome.yaml
-uv run python -m flyhero.connectome.build_graph --config configs/connectome.yaml
-uv run python -m flyhero.connectome.inspect --config configs/connectome.yaml   # -> docs/graph_report.md
-uv run python -m flyhero.connectome.shuffle --config configs/connectome.yaml   # degree-preserving control
+| | |
+|---|---|
+| **Brain / training** | Python 3.12, PyTorch (MPS backend, float32), `uv` for dependency management |
+| **Simulator** | A from-scratch Clone Hero–style engine — chart parsing (`mido` for MIDI), scoring, Gymnasium env |
+| **Data** | polars / pyarrow for the song-library pipeline; TensorBoard for training curves |
+| **Site** | Vite + TypeScript + three.js (WebGL connectome + retina rendering) + Tone.js, deployed to Vercel |
+| **Testing** | `pytest` (160+ tests) on the Python side; Playwright-driven visual/behavioral checks (including a real-mouse-click pause-button regression suite, run against **both Chromium and WebKit**) on the site |
 
-# Song library: scan, then ingest into per-song/difficulty caches + splits
-uv run python -m flyhero.library.scan --config configs/paths.yaml             # -> docs/library_report.md
-uv run python -m flyhero.game.ingest --config configs/game.yaml
-
-# Fast tests (must pass before every commit)
-uv run pytest -q
-```
-
-### Rendering a debug video
-
-`sim.py`'s `--video` CLI renders a 3-panel debug video (note highway | fret targets vs. scripted-player actions with hit/miss/overstrum markers | retina input at each photoreceptor's image position) for one cached `(song_id, difficulty)`, optionally muxing in the song's own audio:
-
-```bash
-PYTHONPATH=. uv run python -m flyhero.game.sim \
-  --config configs/game.yaml \
-  --video <song_id> <difficulty> \
-  --out media/debug/example.mp4 \
-  --mux-audio-from "<song folder rel_path under song_library>" \
-  --audio-mix guitar   # default: guitar stem only. "full": every stem present, mixed equally.
-```
-
-`--audio-mix guitar` picks the `guitar.*` stem by filename (falling back to `song.*` with a printed warning if no guitar stem exists — never a silent substitution of some other stem). Rendered videos are written under `media/` or `runs/`, both gitignored — audio is never committed and never placed under `web/` (D22).
-
-## Training controls (`fly.sh`)
-
-```
-./fly.sh check    # is it running + progress + last 5 evals + checkpoint age + watchdog + total compute
-./fly.sh awake    # keep the Mac awake while training (leave the window open)
-./fly.sh stop     # SIGTERM the training process, waits for a clean checkpoint
-./fly.sh resume   # resume in place: --resume latest --run-dir $RUN (never --init-from); refuses if already running
-./fly.sh guard    # crash auto-resume loop -- run in its own terminal window (--dry-run: print only)
-./fly.sh video [song] [difficulty]   # render a gameplay video at the current checkpoint's skill
-./fly.sh log      # tail the resume log
-```
-
-`RUN` defaults to the newest `runs/<timestamp>_bc_full_real` or `..._bc_full_real_vN` directory (currently `bc_full_real_v2`); override with `RUN=path ./fly.sh ...`. Only the `train.bc` process writing to that exact run dir is detected (not throwaway, smoke, or video runs). `resume` prints the step it expects (from `checkpoint_latest.pt`), stops the new process if it comes up at a different step, and shows the restored watchdog state (rollback count, baseline, best hit_rate, brain LR). `EXTRA_ARGS="--device cpu ..."` appends flags to the resume command. `check` ends with `total compute: Xh Ym` (active training time across all runs; gaps over 5 min don't count; `scripts/training_time.py <run>` without `--total-only` gives the lineage and per-run breakdown). `stop` writes `STOPPED_BY_USER` in the run dir, and `resume` clears it. `guard` checks every 60 s (`GUARD_INTERVAL`). If the run's process is gone and neither `STOPPED.txt` nor `STOPPED_BY_USER` exists, it runs `resume` and logs to `<run>/guard.log`. It allows at most 3 auto-resumes in 12 h (`GUARD_MAX`) and exits on either marker or the cap. If `STOPPED.txt` says `crash:` (a Python exception), the guard moves it to `STOPPED.txt.crash-<epoch>` and resumes, at most once per 12 h; a second crash stays stopped. Watchdog rollback exhaustion and user stops are never resumed. `video` with no song picks the first fixed eval song at the checkpoint's current curriculum difficulty (same 60s excerpt `bc.py`'s own eval scores — the printed `hit_rate` matches it exactly); an explicit song name is fuzzy-matched against val/test songs (`--allow-train` to include train-split songs), and lists matches if ambiguous. Add `--device cpu` if rendering is slow, `--audio guitar` for the guitar stem only (default: every stem mixed), `--ckpt <path>` to pick a specific checkpoint instead of the latest. Output goes to `media/videos/` (gitignored).
+---
 
 ## Repo layout
 
 ```
 flyhero/
-├── connectome/   # download, build_graph, inspect, shuffle (Phase 1)
-├── library/      # read-only song-library scan (Phase 0)
-├── game/         # song model, .chart/.mid parsers, ingest, rules, labels,
-│                 # render, retina, sim/env (Phase 2)
-└── utils/        # config loader, run-dir helper, text decoding
-configs/          # YAML configs; paths.yaml is gitignored
-docs/             # PLAN.md, PROGRESS.md, DECISIONS.md, graph_report.md, library_report.md
-bench/, scripts/  # throughput benchmarks, gate-check scripts
-tests/            # pytest suite (tiny hand-built fixtures + skip-if-absent real-data checks)
-web/              # three.js replay site (Phase 7, not started)
+├── connectome/   # download FlyWire v783, build the trainable graph, inspect, shuffle (control)
+├── library/      # read-only local Clone Hero library scan
+├── game/         # chart/MIDI parsing, scoring rules, retina encoder, Gymnasium env, debug video
+├── brain/        # the rate-coded connectome model, GRU baseline, linear readout
+├── train/        # behavior cloning, the gradient watchdog, readout-only control
+├── eval/         # held-out evaluation
+└── export/       # showcase recording + export for the web site
+configs/          # every entry point takes one of these
+docs/             # PLAN.md, PROGRESS.md, DECISIONS.md — the full build log
+scripts/          # gate-check and status scripts
+tests/            # pytest suite
+web/              # the three.js + Tone.js replay site (this is what's deployed)
 ```
 
-- [`docs/PLAN.md`](docs/PLAN.md) — the full phase-by-phase build plan, gates, and fallbacks.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — append-only log of locked design decisions.
-- [`docs/graph_report.md`](docs/graph_report.md) — connectome graph statistics (Phase 1).
-- [`docs/library_report.md`](docs/library_report.md) — song library inventory and ingest report (Phases 0 & 2).
+- [`docs/PLAN.md`](docs/PLAN.md) — the phase-by-phase build plan, gates, and fallbacks, written *before* starting.
+- [`docs/PROGRESS.md`](docs/PROGRESS.md) — what actually happened, gate numbers, every deviation from the plan.
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — an append-only log of every locked design decision and why.
+
+## Running it locally
+
+You'll need [`uv`](https://docs.astral.sh/uv/), Python 3.12, `ffmpeg`, Node.js, and your own local Clone Hero song library (this repo never ships or commits chart files or non-showcase audio — see [Data and credits](#data-and-credits)).
+
+```bash
+uv sync
+
+# point at your own library (gitignored)
+echo 'song_library: "/path/to/your/Clone Hero/songs"' > configs/paths.yaml
+
+# build the connectome graph (downloads FlyWire v783)
+uv run python -m flyhero.connectome.download --config configs/connectome.yaml
+uv run python -m flyhero.connectome.build_graph --config configs/connectome.yaml
+
+# scan and ingest your song library
+uv run python -m flyhero.library.scan --config configs/paths.yaml
+uv run python -m flyhero.game.ingest --config configs/game.yaml
+
+# run the test suite
+uv run pytest -q
+```
+
+```bash
+# the web site
+cd web
+npm install
+npm run dev      # local dev server
+npm run build    # production build, matches what's deployed
+```
+
+Full training/eval/export commands, plus `fly.sh` (a training-run control script — check status, stop, resume, guard against crashes, render debug videos) are documented in [`docs/PROGRESS.md`](docs/PROGRESS.md) and `CLAUDE.md`.
 
 ## Data and credits
 
-The connectome is [FlyWire](https://flywire.ai/) FAFB v783: Dorkenwald et al. 2024, *Nature*; Schlegel et al. 2024, *Nature*. Licensed CC BY 4.0.
+The connectome is [FlyWire](https://flywire.ai/) FAFB v783 — Dorkenwald et al. 2024, *Nature* (whole-brain connectome), and Schlegel et al. 2024, *Nature* (cell-type annotations) — used under **CC BY 4.0**.
 
-Song charts and audio are **not included** in this repository — users supply their own local Clone Hero library, which is treated as read-only and never committed.
+Clone Hero charts were played from my own local library and are never redistributed; only the full-mix audio for the three showcase songs is committed, as a deliberate, revisit-before-public exception. This project is not affiliated with, endorsed by, or connected to Clone Hero or Guitar Hero.
 
-## Limitations
+---
 
-The brain is an abstract per-cell-type rate model (no spiking, no neuromodulation, no gap junctions), not a full biophysical simulation. Actions come from a linear readout trained by behavior cloning, not the fly's own motor circuits. The "game" is a simplified rhythm-game simulator, not real Clone Hero. HOPO/tap notes are treated as ordinary strums and open notes are dropped entirely (v1 simplifications, see `docs/PLAN.md`).
+Built solo, end-to-end — connectome pipeline, anatomically-calibrated retina, rate-coded brain simulator, behavior-cloning training loop with an overnight-safe gradient watchdog, and the replay site above — over one week.
